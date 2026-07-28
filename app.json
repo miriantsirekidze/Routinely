@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "Routinely",
+    "slug": "routinely",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "routinely",
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "com.routinely.app"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-audio",
+      "expo-sharing",
+      "expo-router",
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200
+        }
+      ],
+      "expo-video",
+      "expo-web-browser",
+      "expo-image"
+    ]
+  }
+}

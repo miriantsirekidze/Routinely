@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Routinely Schedule Import",
+  "description": "Schema for importing templates and weekly schedule into the Routinely app.\n\nRoutinely is a personal time-tracking and routine-testing Android app. The core idea is that the user has a daily routine with activities scheduled throughout the week, and they want to time each activity to see if their planned time allocations are realistic.\n\nHow it works:\n- The user creates Session Templates (e.g., 'Workout - Chest Day', 'Lunch', 'Study - Algorithms')\n- Each template has ordered Sub-Activities (e.g., 'Warm Up' → 'Bench Press' → 'Dumbbell Flys' → 'Cool Down')\n- Templates are assigned to days of the week via the Weekly Schedule\n- When the user starts a session, a stopwatch runs for each sub-activity sequentially with a configurable rest countdown between them\n- The user can pause at any time (e.g., bathroom break) and the pause time is tracked separately\n- Each sub-activity and session can have an expected duration for comparison\n- After finishing all sessions for the day, the user exports a CSV with all timing data\n- History tracks all past sessions, showing trends and comparisons over time\n\nKey concepts:\n- Templates can have Tags for categorization (e.g., 'fitness', 'meals', 'productivity')\n- expectedMinutes is optional but valuable — it lets the user compare actual vs planned time\n- restSeconds is the countdown between sub-activities (default 30 seconds). Set to 0 for activities that flow directly into each other\n- The schedule maps templates to days of the week. A template can appear on multiple days\n- Template names must be unique — if a template with the same name already exists in the app, it will be skipped during import\n\nWhen generating a schedule for the user:\n- Ask them about their weekly routine, what activities they do on which days\n- Break each activity into logical sub-steps they'd want to time individually\n- Set realistic expectedMinutes based on the activity type\n- Use appropriate restSeconds (60s for heavy exercises, 30s for light ones, 0 for non-exercise activities)\n- Assign tags to group related templates\n- The schedule should reflect their actual week — only include days they're active",
+  "type": "object",
+  "required": ["templates", "schedule"],
+  "properties": {
+    "templates": {
+      "type": "array",
+      "description": "List of session templates to create. If a template with the same name already exists, it will be skipped.",
+      "items": {
+        "type": "object",
+        "required": ["name", "activities"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Template name, e.g. 'Workout - Chest Day', 'Lunch', 'Study - Algorithms'. Must be unique."
+          },
+          "expectedMinutes": {
+            "type": "number",
+            "description": "Optional expected total duration in minutes for the entire session. Used for comparing actual vs planned time."
+          },
+          "tags": {
+            "type": "array",
+            "description": "Optional tags to categorize this template, e.g. ['fitness', 'upper body']. Tags are created automatically if they don't exist.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "activities": {
+            "type": "array",
+            "description": "Ordered list of sub-activities within this session. These run sequentially — when one finishes, a rest countdown starts, then the next one begins automatically.",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Activity name, e.g. 'Warm Up', 'Bench Press', 'Cool Down'"
+                },
+                "expectedMinutes": {
+                  "type": "number",
+                  "description": "Optional expected duration for this specific activity in minutes"
+                },
+                "restSeconds": {
+                  "type": "number",
+                  "description": "Rest duration in seconds before the next activity starts automatically. Use 60-90 for heavy exercises, 30 for light ones, 0 for activities that flow directly into each other. Default: 30",
+                  "default": 30
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "description": "Weekly schedule mapping days to template names. Each day contains an ordered array of template names that should be done that day. Only include days that have activities planned.",
+      "properties": {
+        "monday": { "type": "array", "items": { "type": "string" } },
+        "tuesday": { "type": "array", "items": { "type": "string" } },
+        "wednesday": { "type": "array", "items": { "type": "string" } },
+        "thursday": { "type": "array", "items": { "type": "string" } },
+        "friday": { "type": "array", "items": { "type": "string" } },
+        "saturday": { "type": "array", "items": { "type": "string" } },
+        "sunday": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "examples": [
+    {
+      "templates": [
+        {
+          "name": "Workout - Chest Day",
+          "expectedMinutes": 55,
+          "tags": ["fitness", "upper body"],
+          "activities": [
+            { "name": "Warm Up", "expectedMinutes": 5, "restSeconds": 30 },
+            { "name": "Bench Press", "expectedMinutes": 15, "restSeconds": 90 },
+            { "name": "Incline Dumbbell Press", "expectedMinutes": 12, "restSeconds": 60 },
+            { "name": "Cable Flys", "expectedMinutes": 10, "restSeconds": 45 },
+            { "name": "Tricep Pushdowns", "expectedMinutes": 8, "restSeconds": 45 },
+            { "name": "Cool Down & Stretch", "expectedMinutes": 5, "restSeconds": 0 }
+          ]
+        },
+        {
+          "name": "Lunch",
+          "expectedMinutes": 35,
+          "tags": ["meals"],
+          "activities": [
+            { "name": "Cooking / Heating", "expectedMinutes": 15, "restSeconds": 0 },
+            { "name": "Eating", "expectedMinutes": 20, "restSeconds": 0 }
+          ]
+        },
+        {
+          "name": "Study - Algorithms",
+          "expectedMinutes": 90,
+          "tags": ["productivity", "learning"],
+          "activities": [
+            { "name": "Review Notes", "expectedMinutes": 15, "restSeconds": 0 },
+            { "name": "Problem Solving", "expectedMinutes": 45, "restSeconds": 300 },
+            { "name": "Practice Coding", "expectedMinutes": 30, "restSeconds": 0 }
+          ]
+        }
+      ],
+      "schedule": {
+        "monday": ["Workout - Chest Day", "Lunch", "Study - Algorithms"],
+        "tuesday": ["Lunch"],
+        "wednesday": ["Workout - Chest Day", "Lunch"],
+        "thursday": ["Lunch", "Study - Algorithms"],
+        "friday": ["Workout - Chest Day", "Lunch"]
+      }
+    }
+  ]
+}
