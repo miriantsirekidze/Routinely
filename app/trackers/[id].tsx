@@ -9,7 +9,6 @@ import {
   getTrackerResets,
   resetTracker,
   deleteTracker,
-  saveMilestone,
   formatVerboseElapsed,
   Tracker,
   TrackerReset,
@@ -17,7 +16,8 @@ import {
 import { titleCase } from "../../src/utils/text";
 import { BadgeIcon } from "../../src/components/BadgeIcon";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
-import { getMilestoneDay, buildMilestonePrompt, buildRelapsePrompt } from "../../src/llm/config";
+import { getMilestoneDay, buildRelapsePrompt } from "../../src/llm/config";
+import { acquireLlm, releaseLlm, onLlmFree } from "../../src/llm/llmLock";
 import { formatElapsedDays } from "../../src/db/trackers";
 
 function formatResetDuration(ms: number): string {
@@ -43,20 +43,36 @@ export default function TrackerDetailScreen() {
   const [relapseMsg, setRelapseMsg] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [milestoneText, setMilestoneText] = useState<string | null>(null);
-  const generatingRef = useRef(false);
   const relapseGeneratingRef = useRef(false);
-  // Set to true when the user triggers a reset — forces the model to load
-  // even if the milestone is already cached (preventLoad would normally block it)
+  // Set to true when the user triggers a reset — this is the only path that loads the model
+  // on this screen. Milestone notes are generated in the background by MilestoneWorker.
   const [needRelapseMsg, setNeedRelapseMsg] = useState(false);
+  const [hasLlmLock, setHasLlmLock] = useState(false);
 
   const milestoneDay = getMilestoneDay(elapsed);
-  const hasCachedMilestone =
-    tracker?.milestoneDay === milestoneDay && !!tracker?.milestoneText;
 
+  // Only load the model once we hold the shared LLM lock, so it's never loaded concurrently
+  // with the background milestone worker.
   const llm = useLLM({
     model: QWEN2_5_1_5B_QUANTIZED,
-    preventLoad: !needRelapseMsg && (hasCachedMilestone || milestoneDay === null),
+    preventLoad: !hasLlmLock,
   });
+
+  // Hold the LLM lock while a relapse message is needed; release on cancel/finish/unmount.
+  useEffect(() => {
+    if (!needRelapseMsg) return;
+    let acquired = false;
+    const take = () => {
+      if (acquireLlm()) { acquired = true; setHasLlmLock(true); return true; }
+      return false;
+    };
+    let unsub: (() => void) | undefined;
+    if (!take()) unsub = onLlmFree(() => { if (take()) unsub?.(); });
+    return () => {
+      unsub?.();
+      if (acquired) { releaseLlm(); setHasLlmLock(false); }
+    };
+  }, [needRelapseMsg]);
 
   const load = useCallback(async () => {
     const all = await getTrackers();
@@ -77,27 +93,6 @@ export default function TrackerDetailScreen() {
     const interval = setInterval(() => setElapsed((p) => p + 60000), 60000);
     return () => clearInterval(interval);
   }, [tracker]);
-
-  // Generate milestone text when model is ready and no cache exists
-  useEffect(() => {
-    if (
-      !llm.isReady ||
-      hasCachedMilestone ||
-      milestoneDay === null ||
-      !tracker ||
-      generatingRef.current
-    ) return;
-
-    generatingRef.current = true;
-    const messages = buildMilestonePrompt(tracker.name, tracker.description, milestoneDay);
-    llm.generate(messages as any).then((text) => {
-      if (text) {
-        setMilestoneText(text);
-        saveMilestone(trackerId, milestoneDay, text);
-      }
-      generatingRef.current = false;
-    }).catch(() => { generatingRef.current = false; });
-  }, [llm.isReady, hasCachedMilestone, milestoneDay, tracker]);
 
   // Interrupt on unmount to prevent crash
   useEffect(() => {
@@ -201,21 +196,11 @@ export default function TrackerDetailScreen() {
             <Text style={styles.milestoneLabel}>Day {milestoneDay}</Text>
             {milestoneText ? (
               <Text style={styles.milestoneText}>{milestoneText}</Text>
-            ) : llm.isGenerating ? (
-              <Text style={styles.milestoneText}>
-                {llm.response || "Generating…"}
-              </Text>
-            ) : llm.downloadProgress > 0 && llm.downloadProgress < 1 ? (
+            ) : (
               <Text style={styles.milestoneLoading}>
-                Downloading AI model… {Math.round(llm.downloadProgress * 100)}%
+                Generating your Day {milestoneDay} insight…
               </Text>
-            ) : llm.error ? (
-              <Text style={styles.milestoneLoading}>
-                Model downloading in background — come back in a moment.
-              </Text>
-            ) : !llm.isReady && !hasCachedMilestone ? (
-              <Text style={styles.milestoneLoading}>Loading model…</Text>
-            ) : null}
+            )}
           </View>
         )}
 

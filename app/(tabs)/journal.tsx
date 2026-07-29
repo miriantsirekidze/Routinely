@@ -1,10 +1,10 @@
-import { useCallback, useState } from "react";
-import { View, Text, StyleSheet, Pressable, FlatList } from "react-native";
+import { View, Text, StyleSheet, Pressable, FlatList, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import Feather from "@expo/vector-icons/Feather";
 import { getFolders, JournalFolder } from "../../src/db/journal";
+import { useCachedQuery } from "../../src/db/queryCache";
 import { BadgeIcon } from "../../src/components/BadgeIcon";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
 import { titleCase } from "../../src/utils/text";
@@ -28,12 +28,9 @@ function folderSubtitle(folder: JournalFolder): string {
 
 export default function JournalScreen() {
   const router = useRouter();
-  const [folders, setFolders] = useState<JournalFolder[]>([]);
-
-  useFocusEffect(
-    useCallback(() => {
-      getFolders().then(setFolders);
-    }, [])
+  const { data: folders = [], loading, error } = useCachedQuery<JournalFolder[]>(
+    "journal:folders",
+    getFolders
   );
 
   return (
@@ -45,7 +42,16 @@ export default function JournalScreen() {
         </Pressable>
       </View>
 
-      {folders.length === 0 ? (
+      {loading ? (
+        <View style={styles.empty}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      ) : error ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyTitle}>Couldn't load folders</Text>
+          <Text style={styles.emptySubtitle}>{error.message}</Text>
+        </View>
+      ) : folders.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyTitle}>No folders yet</Text>
           <Text style={styles.emptySubtitle}>Create a folder to start journaling</Text>

@@ -1,6 +1,7 @@
 import { db } from "./client";
 import { journalFolders, journalVariables, journalEntries, journalFieldValues } from "./schema";
 import { eq, desc, asc } from "drizzle-orm";
+import { invalidate } from "./queryCache";
 
 export type VarType = "number" | "text" | "description" | "image" | "checkbox" | "voice";
 
@@ -71,6 +72,7 @@ export async function getFolder(id: number): Promise<JournalFolder | null> {
 }
 
 export async function saveFolderDescription(id: number, description: string): Promise<void> {
+  invalidate("journal");
   await db.update(journalFolders).set({ description }).where(eq(journalFolders.id, id));
 }
 
@@ -78,6 +80,7 @@ export async function updateFolder(
   id: number,
   patch: { name?: string; emoji?: string | null; description?: string | null }
 ): Promise<void> {
+  invalidate("journal");
   await db.update(journalFolders).set(patch).where(eq(journalFolders.id, id));
 }
 
@@ -92,6 +95,7 @@ export async function setFolderVariables(
     allowMultiple?: boolean;
   }>
 ): Promise<void> {
+  invalidate("journal");
   const existing = await db.select().from(journalVariables)
     .where(eq(journalVariables.folderId, folderId));
 
@@ -143,6 +147,7 @@ export async function createFolder(data: {
     allowMultiple?: boolean;
   }>;
 }): Promise<JournalFolder> {
+  invalidate("journal");
   const existing = await db.select().from(journalFolders)
     .orderBy(desc(journalFolders.sortOrder)).limit(1);
   const nextOrder = existing[0] ? existing[0].sortOrder + 1 : 0;
@@ -173,6 +178,7 @@ export async function createFolder(data: {
 }
 
 export async function deleteFolder(id: number): Promise<void> {
+  invalidate("journal");
   await db.delete(journalFolders).where(eq(journalFolders.id, id));
 }
 

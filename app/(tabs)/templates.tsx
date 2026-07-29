@@ -1,4 +1,3 @@
-import { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -8,13 +7,14 @@ import {
   ToastAndroid,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import {
   getAllTemplates,
   deleteTemplate,
   TemplateWithSubs,
 } from "../../src/db/templates";
+import { useCachedQuery } from "../../src/db/queryCache";
 import { ActionButton } from "../../src/components/ActionButton";
 import { TagChip } from "../../src/components/TagChip";
 import { formatDuration } from "../../src/utils/time";
@@ -22,17 +22,14 @@ import { colors, typography, spacing, radius } from "../../src/constants/theme";
 
 export default function TemplatesScreen() {
   const router = useRouter();
-  const [templates, setTemplates] = useState<TemplateWithSubs[]>([]);
-
-  useFocusEffect(
-    useCallback(() => {
-      getAllTemplates().then(setTemplates);
-    }, [])
+  const { data: templates = [], refresh } = useCachedQuery<TemplateWithSubs[]>(
+    "templates:all",
+    getAllTemplates
   );
 
   const handleDelete = async (t: TemplateWithSubs) => {
     await deleteTemplate(t.id);
-    setTemplates((prev) => prev.filter((x) => x.id !== t.id));
+    refresh();
     ToastAndroid.show(`"${t.name}" deleted`, ToastAndroid.SHORT);
   };
 

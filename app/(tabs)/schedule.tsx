@@ -8,7 +8,7 @@ import {
   ToastAndroid,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import {
   getFullSchedule,
@@ -18,6 +18,7 @@ import {
   ScheduleEntry,
 } from "../../src/db/schedule";
 import { getEventsForMonth, CalendarEvent } from "../../src/db/events";
+import { useCachedQuery } from "../../src/db/queryCache";
 import { Accordion } from "../../src/components/Accordion";
 import { MonthCalendar } from "../../src/components/MonthCalendar";
 import { formatDuration } from "../../src/utils/time";
@@ -27,19 +28,23 @@ import { colors, typography, spacing, radius } from "../../src/constants/theme";
 
 export default function PlanScreen() {
   const router = useRouter();
-  const [schedule, setSchedule] = useState<Record<number, ScheduleEntry[]>>({});
   const [calendarMonth, setCalendarMonth] = useState(new Date());
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
   const today = new Date().getDay();
 
-  useFocusEffect(
-    useCallback(() => {
-      getFullSchedule().then(setSchedule);
-      getEventsForMonth(
-        calendarMonth.getFullYear(),
-        calendarMonth.getMonth()
-      ).then(setEvents);
-    }, [calendarMonth])
+  const { data: schedule = {}, refresh: refreshSchedule } = useCachedQuery<
+    Record<number, ScheduleEntry[]>
+  >("schedule:full", getFullSchedule);
+
+  const calYear = calendarMonth.getFullYear();
+  const calMonth = calendarMonth.getMonth();
+  const { data: events = [] } = useCachedQuery<CalendarEvent[]>(
+    `events:${calYear}-${calMonth}`,
+    () => getEventsForMonth(calYear, calMonth)
+  );
+
+  const handleDayPress = useCallback(
+    (date: string) => router.push(`/events/day?date=${date}`),
+    [router]
   );
 
   const goToPrevMonth = () =>
@@ -50,7 +55,7 @@ export default function PlanScreen() {
 
   const handleRemove = async (entry: ScheduleEntry) => {
     await removeFromSchedule(entry.id);
-    getFullSchedule().then(setSchedule);
+    refreshSchedule();
     ToastAndroid.show("Removed", ToastAndroid.SHORT);
   };
 
@@ -86,7 +91,7 @@ export default function PlanScreen() {
               year={calendarMonth.getFullYear()}
               month={calendarMonth.getMonth()}
               events={events}
-              onDayPress={(date) => router.push(`/events/day?date=${date}`)}
+              onDayPress={handleDayPress}
             />
           </View>
 

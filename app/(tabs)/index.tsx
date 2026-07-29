@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -10,7 +10,7 @@ import {
   RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useTimerStore } from "../../src/stores/timerStore";
 import { getAllTemplates, TemplateWithSubs } from "../../src/db/templates";
@@ -26,6 +26,7 @@ import { getSuggestions, Suggestion } from "../../src/db/suggestions";
 import { getHeatmapData, HeatmapData } from "../../src/db/heatmap";
 import { getTrackers, Tracker } from "../../src/db/trackers";
 import { getUpcomingEvents, CalendarEvent } from "../../src/db/events";
+import { useCachedQuery } from "../../src/db/queryCache";
 import { localDateStr, formatShortDate, parseDateBadge } from "../../src/utils/date";
 import { titleCase } from "../../src/utils/text";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
@@ -45,47 +46,42 @@ function daysUntilLabel(startDate: string): string {
 export default function TodayScreen() {
   const router = useRouter();
   const status = useTimerStore((s) => s.status);
-  const [templates, setTemplates] = useState<TemplateWithSubs[]>([]);
-  const [todaySchedule, setTodaySchedule] = useState<ScheduleEntry[]>([]);
-  const [streak, setStreak] = useState<StreakData | null>(null);
-  const [upNext, setUpNext] = useState<Suggestion[]>([]);
-  const [heatmap, setHeatmap] = useState<HeatmapData | null>(null);
-  const [trackers, setTrackers] = useState<Tracker[]>([]);
-  const [upcomingEvents, setUpcomingEvents] = useState<CalendarEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-
   const todayDay = new Date().getDay();
 
-  const fetchAll = useCallback((isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    return Promise.all([
-        getAllTemplates().then(setTemplates),
-        getScheduleForDay(todayDay).then(setTodaySchedule),
-        getStreakData().then(setStreak),
-        getSuggestions(20).then(setUpNext),
-        getHeatmapData().then(setHeatmap),
-        getTrackers().then(setTrackers),
-        getUpcomingEvents(3).then(setUpcomingEvents),
-      ]).finally(() => {
-        setLoading(false);
-        setRefreshing(false);
-      });
-  }, [todayDay]);
+  const { data: templates = [], refresh: refreshTemplates } = useCachedQuery<TemplateWithSubs[]>(
+    "templates:all", getAllTemplates);
+  const { data: todaySchedule = [], refresh: refreshSchedule } = useCachedQuery<ScheduleEntry[]>(
+    `schedule:day:${todayDay}`, () => getScheduleForDay(todayDay));
+  const { data: streak = null, refresh: refreshStreak } = useCachedQuery<StreakData | null>(
+    "streak", getStreakData);
+  const { data: upNext = [], refresh: refreshUpNext } = useCachedQuery<Suggestion[]>(
+    "suggestions", () => getSuggestions(20));
+  const { data: heatmap = null, loading: heatmapLoading, refresh: refreshHeatmap } =
+    useCachedQuery<HeatmapData | null>("heatmap", getHeatmapData);
+  const { data: trackers = [], refresh: refreshTrackers } = useCachedQuery<Tracker[]>(
+    "trackers", getTrackers);
+  const { data: upcomingEvents = [], refresh: refreshEvents } = useCachedQuery<CalendarEvent[]>(
+    "events:upcoming", () => getUpcomingEvents(3));
 
-  useFocusEffect(
-    useCallback(() => {
-      fetchAll();
-    }, [fetchAll])
-  );
+  const [refreshing, setRefreshing] = useState(false);
+  const initialLoading = heatmapLoading && !heatmap;
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([
+      refreshTemplates(), refreshSchedule(), refreshStreak(),
+      refreshUpNext(), refreshHeatmap(), refreshTrackers(), refreshEvents(),
+    ]);
+    setRefreshing(false);
+  };
 
   // Re-fetch tracker elapsed every 60 s while the screen is mounted
   useEffect(() => {
     const interval = setInterval(() => {
-      getTrackers().then(setTrackers);
+      refreshTrackers();
     }, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshTrackers]);
 
 
   const today = new Date().toLocaleDateString("en-US", {
@@ -96,16 +92,6 @@ export default function TodayScreen() {
 
   const hasActiveSession = status !== "idle" && status !== "finished";
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView
@@ -114,7 +100,7 @@ export default function TodayScreen() {
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={() => fetchAll(true)}
+            onRefresh={onRefresh}
             colors={[colors.green]}
           />
         }
@@ -123,6 +109,12 @@ export default function TodayScreen() {
           <Text style={styles.greeting}>Today</Text>
           <Text style={styles.date}>{today}</Text>
         </View>
+
+        {initialLoading && (
+          <View style={styles.initialLoading}>
+            <ActivityIndicator size="large" color={colors.primary} />
+          </View>
+        )}
 
         {heatmap && (
           <View style={styles.heatmapSection}>
@@ -390,7 +382,7 @@ export default function TodayScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { paddingBottom: 100 },
-  loadingContainer: { flex: 1, justifyContent: "center", alignItems: "center" },
+  initialLoading: { paddingVertical: spacing.xxl, alignItems: "center" },
   header: { paddingTop: spacing.lg, paddingHorizontal: spacing.lg },
   heatmapSection: { marginTop: spacing.lg, paddingHorizontal: spacing.lg },
   heatmapHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },

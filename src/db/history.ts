@@ -1,8 +1,10 @@
 import { db } from "./client";
 import { days, sessions, subActivities, pauses } from "./schema";
 import { eq, desc, asc, and, lt, inArray } from "drizzle-orm";
+import { invalidateSessionData } from "./queryCache";
 
 export async function deleteSession(sessionId: number): Promise<void> {
+  invalidateSessionData();
   const subs = await db
     .select({ id: subActivities.id })
     .from(subActivities)

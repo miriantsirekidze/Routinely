@@ -1055,6 +1055,15 @@ function CanvasCard({
   // blocks the canvas pan so a held drag moves the card instead of panning.
   const gesture = Gesture.Race(dragGesture, longPress, doubleTap, tapGesture);
 
+  // The eye chip must use a gesture-handler Tap (not a plain Pressable) so it can win against
+  // the canvas pan/pinch ancestor via blocksExternalGesture — otherwise the pan swallows the
+  // tap on Android and the eye appears unresponsive.
+  const eyeTap = Gesture.Tap()
+    .enabled(!locked)
+    .maxDuration(250)
+    .blocksExternalGesture(panRef)
+    .onEnd(() => { runOnJS(onToggleCollapse)(node.id, !node.collapsed); });
+
   // Outer wrapper holds position; card keeps the width. The eye chip is a flow
   // child below the card so the wrapper grows to include it (Android delivers
   // touches only within a parent's bounds — an absolute chip below the card
@@ -1063,9 +1072,12 @@ function CanvasCard({
     position: "absolute",
     left: absX.value,
     top: absY.value,
-    opacity: cardOpacity.value,
+    // Hidden (collapsed-branch) cards go fully transparent. This MUST live in the animated
+    // style: a static `opacity: 0` override is overridden by this animated opacity on the UI
+    // thread every frame, which is why collapsing appeared to hide the arrows but not cards.
+    opacity: hidden ? 0 : cardOpacity.value,
     alignItems: "flex-end",
-  }));
+  }), [hidden]);
   const cardStyle = useAnimatedStyle(() => ({
     width: cardWidth.value,
   }));
@@ -1097,7 +1109,7 @@ function CanvasCard({
     // Hidden cards stay mounted + laid out (so no image reload / height thrash on
     // re-show) but render invisible and non-interactive.
     <Animated.View
-      style={[wrapperStyle, hidden && styles.cardHidden]}
+      style={wrapperStyle}
       pointerEvents={hidden ? "none" : "box-none"}
     >
       <GestureDetector gesture={gesture}>
@@ -1121,18 +1133,16 @@ function CanvasCard({
           tap, never opens the modal) and OUTSIDE the card's GestureDetector. White
           fill so an arrow reads as passing under it. Only when it has children. */}
       {childCount > 0 && !locked && (
-        <Pressable
-          style={styles.collapseChip}
-          hitSlop={10}
-          onPress={() => onToggleCollapse(node.id, !node.collapsed)}
-        >
-          <Feather
-            name={node.collapsed ? "eye-off" : "eye"}
-            size={24}
-            color={colors.neutralDarkMedium}
-          />
-          <Text style={styles.collapseChipText}>{childCount}</Text>
-        </Pressable>
+        <GestureDetector gesture={eyeTap}>
+          <View style={styles.collapseChip} hitSlop={10}>
+            <Feather
+              name={node.collapsed ? "eye-off" : "eye"}
+              size={24}
+              color={colors.neutralDarkMedium}
+            />
+            <Text style={styles.collapseChipText}>{childCount}</Text>
+          </View>
+        </GestureDetector>
       )}
 
       {/* Frame number badge (top-left) — only on frames (roots) that are ordered. */}

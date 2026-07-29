@@ -2,6 +2,7 @@ import { db } from "./client";
 import { calendarEvents, eventDayNotes } from "./schema";
 import { eq, and, lte, gte } from "drizzle-orm";
 import { localDateStr, addDays } from "../utils/date";
+import { invalidate } from "./queryCache";
 
 export type CalendarEvent = {
   id: number;
@@ -65,6 +66,7 @@ export async function createEvent(data: {
   startDate: string;
   endDate: string;
 }): Promise<CalendarEvent> {
+  invalidate("events");
   const result = await db.insert(calendarEvents).values(data).returning();
   return result[0] as CalendarEvent;
 }
@@ -73,10 +75,12 @@ export async function updateEvent(
   id: number,
   patch: Partial<Pick<CalendarEvent, "title" | "startDate" | "endDate" | "completed">>
 ): Promise<void> {
+  invalidate("events");
   await db.update(calendarEvents).set(patch).where(eq(calendarEvents.id, id));
 }
 
 export async function deleteEvent(id: number): Promise<void> {
+  invalidate("events");
   await db.delete(calendarEvents).where(eq(calendarEvents.id, id));
 }
 

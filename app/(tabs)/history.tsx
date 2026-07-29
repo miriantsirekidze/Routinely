@@ -1,4 +1,4 @@
-import { useCallback, useState, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -7,9 +7,10 @@ import {
   Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter, useFocusEffect } from "expo-router";
+import { useRouter } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { getHistoryDays, deleteSession, HistoryDay, HistorySession } from "../../src/db/history";
+import { useCachedQuery } from "../../src/db/queryCache";
 import { Accordion } from "../../src/components/Accordion";
 import { DeleteConfirmSheet, DeleteConfirmSheetRef } from "../../src/components/DeleteConfirmSheet";
 import { formatElapsedShort } from "../../src/utils/time";
@@ -17,23 +18,24 @@ import { colors, typography, spacing, radius } from "../../src/constants/theme";
 
 export default function HistoryScreen() {
   const router = useRouter();
-  const [history, setHistory] = useState<HistoryDay[]>([]);
+  const { data: history = [], refresh } = useCachedQuery<HistoryDay[]>(
+    "history:days",
+    getHistoryDays
+  );
   const deleteSheetRef = useRef<DeleteConfirmSheetRef>(null);
   const pendingDeleteRef = useRef<(() => Promise<void>) | null>(null);
 
-  useFocusEffect(
-    useCallback(() => {
-      getHistoryDays().then(setHistory);
-    }, [])
+  const sections = useMemo(
+    () =>
+      history.map((day) => ({
+        title: day.date,
+        finishedAt: day.finishedAt,
+        data: day.sessions,
+      })),
+    [history]
   );
 
-  const sections = history.map((day) => ({
-    title: day.date,
-    finishedAt: day.finishedAt,
-    data: day.sessions,
-  }));
-
-  const formatDate = (dateStr: string) => {
+  const formatDate = useCallback((dateStr: string) => {
     const d = new Date(dateStr + "T12:00:00");
     const today = new Date();
     const yesterday = new Date();
@@ -47,9 +49,9 @@ export default function HistoryScreen() {
       month: "short",
       day: "numeric",
     });
-  };
+  }, []);
 
-  const renderSession = ({
+  const renderSession = useCallback(({
     item,
     index,
   }: {
@@ -69,7 +71,7 @@ export default function HistoryScreen() {
             onLongPress={() => {
               pendingDeleteRef.current = async () => {
                 await deleteSession(item.id);
-                getHistoryDays().then(setHistory);
+                refresh();
               };
               deleteSheetRef.current?.present(item.name);
             }}
@@ -119,9 +121,9 @@ export default function HistoryScreen() {
         </Pressable>
       </Accordion>
     </Animated.View>
-  );
+  ), [router, refresh]);
 
-  const renderSectionHeader = ({
+  const renderSectionHeader = useCallback(({
     section,
   }: {
     section: { title: string };
@@ -130,7 +132,7 @@ export default function HistoryScreen() {
       <Text style={styles.sectionDate}>{formatDate(section.title)}</Text>
       <Text style={styles.sectionDateFull}>{section.title}</Text>
     </View>
-  );
+  ), [formatDate]);
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>

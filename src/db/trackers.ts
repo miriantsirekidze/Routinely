@@ -1,6 +1,7 @@
 import { db } from "./client";
 import { trackers, trackerResets } from "./schema";
 import { eq, desc } from "drizzle-orm";
+import { invalidate } from "./queryCache";
 
 export type Tracker = {
   id: number;
@@ -46,6 +47,7 @@ export async function createTracker(data: {
   startedAt: Date;
   targetDays?: number | null;
 }): Promise<Tracker> {
+  invalidate("trackers");
   const result = await db
     .insert(trackers)
     .values({
@@ -61,10 +63,12 @@ export async function createTracker(data: {
 }
 
 export async function deleteTracker(id: number): Promise<void> {
+  invalidate("trackers");
   await db.delete(trackers).where(eq(trackers.id, id));
 }
 
 export async function resetTracker(id: number, note?: string): Promise<void> {
+  invalidate("trackers");
   const rows = await db.select().from(trackers).where(eq(trackers.id, id)).limit(1);
   if (!rows[0]) return;
 
@@ -90,6 +94,7 @@ export async function saveMilestone(
   day: number,
   text: string
 ): Promise<void> {
+  invalidate("trackers");
   await db
     .update(trackers)
     .set({ milestoneDay: day, milestoneText: text })

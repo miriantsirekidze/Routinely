@@ -3,10 +3,12 @@ import { View, Text, ActivityIndicator, StyleSheet } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider, initialWindowMetrics } from "react-native-safe-area-context";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { initExecutorch } from "react-native-executorch";
 import { ExpoResourceFetcher } from "react-native-executorch-expo-resource-fetcher";
 import { runMigrations } from "../src/db/migrate";
+import { MilestoneWorker } from "../src/components/MilestoneWorker";
 import { requestPermissions, scheduleDayReminder } from "../src/utils/notifications";
 import { colors, typography, spacing } from "../src/constants/theme";
 
@@ -56,16 +58,19 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <BottomSheetModalProvider>
       <StatusBar style="dark" />
       <Stack
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: colors.background },
-          animation: "slide_from_right",
+          animation: "ios_from_right",
         }}
       />
+      <MilestoneWorker />
       </BottomSheetModalProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

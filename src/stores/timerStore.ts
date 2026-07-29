@@ -3,6 +3,7 @@ import { db } from "../db/client";
 import { days, sessions, subActivities, pauses } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { getTodayDate } from "../utils/time";
+import { invalidateSessionData } from "../db/queryCache";
 import {
   showTimerNotification,
   updateTimerNotification,
@@ -300,6 +301,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
       .where(eq(sessions.id, state.sessionDbId));
 
     set({ status: "finished" });
+    invalidateSessionData();
     dismissTimerNotification();
   },
 
@@ -324,6 +326,7 @@ export const useTimerStore = create<TimerState>((set, get) => ({
     await db.delete(sessions).where(eq(sessions.id, state.sessionDbId));
 
     set(initialState);
+    invalidateSessionData();
     dismissTimerNotification();
   },
 

@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { CalendarEvent } from "../db/events";
 import { colors, typography, radius } from "../constants/theme";
@@ -44,11 +45,7 @@ function isInRange(date: string, start?: string, end?: string): boolean {
   return date >= s && date <= e;
 }
 
-function hasEvent(date: string, events: CalendarEvent[]): boolean {
-  return events.some((e) => e.startDate <= date && e.endDate >= date);
-}
-
-export function MonthCalendar({
+function MonthCalendarImpl({
   year,
   month,
   events = [],
@@ -59,9 +56,35 @@ export function MonthCalendar({
   minDate,
   maxDate,
 }: Props) {
-  const weeks = buildMonthGrid(year, month);
+  const weeks = useMemo(() => buildMonthGrid(year, month), [year, month]);
   const today = localDateStr(new Date());
   const isSelectionMode = !!onDaySelect;
+
+  // Precompute event day lookups once (per events/month) instead of scanning `events`
+  // for all 42 cells on every render.
+  const { endpoints, covered } = useMemo(() => {
+    const endpoints = new Set<string>();
+    const covered = new Set<string>();
+    const visible = weeks.flat().filter(Boolean) as string[];
+    if (visible.length > 0) {
+      const first = visible[0];
+      const last = visible[visible.length - 1];
+      for (const e of events) {
+        endpoints.add(e.startDate);
+        endpoints.add(e.endDate);
+        const start = e.startDate < first ? first : e.startDate;
+        const end = e.endDate > last ? last : e.endDate;
+        if (start > end) continue;
+        const d = new Date(start + "T12:00:00");
+        const endD = new Date(end + "T12:00:00");
+        while (d <= endD) {
+          covered.add(localDateStr(d));
+          d.setDate(d.getDate() + 1);
+        }
+      }
+    }
+    return { endpoints, covered };
+  }, [events, weeks]);
 
   function handlePress(date: string) {
     if (isSelectionMode) onDaySelect?.(date);
@@ -98,11 +121,9 @@ export function MonthCalendar({
               isInRange(date, selectionStart, selectionEnd);
 
             // View mode (showing events)
-            const isEventEndpoint =
-              !isSelectionMode &&
-              events.some((e) => e.startDate === date || e.endDate === date);
+            const isEventEndpoint = !isSelectionMode && endpoints.has(date);
             const isEventMiddle =
-              !isSelectionMode && !isEventEndpoint && hasEvent(date, events);
+              !isSelectionMode && !isEventEndpoint && covered.has(date);
 
             const isDeepGreen = isSelectionEndpoint || isEventEndpoint;
 
@@ -159,6 +180,8 @@ export function MonthCalendar({
     </View>
   );
 }
+
+export const MonthCalendar = memo(MonthCalendarImpl);
 
 const styles = StyleSheet.create({
   container: { paddingHorizontal: 4 },

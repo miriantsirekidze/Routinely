@@ -2,6 +2,7 @@ import { db } from "./client";
 import { sessionTemplates, subActivityTemplates } from "./schema";
 import { eq, asc } from "drizzle-orm";
 import { getTagsForTemplate, Tag } from "./tags";
+import { invalidate } from "./queryCache";
 
 export type TemplateSubActivity = {
   name: string;
@@ -91,6 +92,7 @@ export async function createTemplate(
   expectedDuration: number | undefined,
   subs: Omit<TemplateSubActivity, "sortOrder">[]
 ): Promise<number> {
+  invalidate("templates");
   const result = await db
     .insert(sessionTemplates)
     .values({
@@ -121,6 +123,7 @@ export async function updateTemplate(
   expectedDuration: number | undefined,
   subs: Omit<TemplateSubActivity, "sortOrder">[]
 ): Promise<void> {
+  invalidate("templates");
   await db
     .update(sessionTemplates)
     .set({ name, expectedDuration: expectedDuration ?? null })
@@ -142,5 +145,6 @@ export async function updateTemplate(
 }
 
 export async function deleteTemplate(id: number): Promise<void> {
+  invalidate("templates");
   await db.delete(sessionTemplates).where(eq(sessionTemplates.id, id));
 }
