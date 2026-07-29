@@ -1,16 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, Pressable, Dimensions,
-  Image, ScrollView, Modal, FlatList, ActivityIndicator,
+  Image, ScrollView, Modal, FlatList, ActivityIndicator, ToastAndroid,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import {
   Gesture, GestureDetector,
+  type GestureType,
 } from "react-native-gesture-handler";
 import Animated, {
   useSharedValue, useAnimatedStyle, useDerivedValue,
   runOnJS, cancelAnimation, clamp, withTiming, withSpring,
+  type SharedValue,
 } from "react-native-reanimated";
 import Svg, { Defs, Pattern, Circle, Rect } from "react-native-svg";
 import { Canvas, Fill, Shader, Skia, Path as SkiaPath, Group as SkiaGroup } from "@shopify/react-native-skia";
@@ -18,6 +20,7 @@ import { BottomSheetModal, BottomSheetView, BottomSheetScrollView, BottomSheetTe
 import * as ImagePicker from "expo-image-picker";
 import * as WebBrowser from "expo-web-browser";
 import * as FileSystem from "expo-file-system";
+import { cacheDirectory } from "expo-file-system/legacy";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { Image as ExpoImage } from "expo-image";
 import DraggableFlatList, { RenderItemParams } from "react-native-draggable-flatlist";
@@ -30,13 +33,17 @@ import {
   CanvasNode, CanvasFile, CanvasConnection,
 } from "../../src/db/canvas";
 import {
-  CanvasTodoItem, CanvasMediaItem, CanvasLinkMeta, CanvasPlaceMeta,
+  CanvasTodoItem, CanvasMediaItem, CanvasLinkMeta, CanvasPlaceMeta, CanvasAudioMeta,
   getTodoItems, createTodoItem, toggleTodoItem, deleteTodoItem, reorderTodoItems,
   getMediaItems, createMediaItem, deleteMediaItem,
   getLinkMeta, saveLinkMeta,
   getPlaceMeta, savePlaceMeta,
+  getAudioMeta, saveAudioMeta,
   fetchOpenGraph,
 } from "../../src/db/canvas-components";
+import * as DocumentPicker from "expo-document-picker";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import YoutubePlayer, { YoutubeIframeRef } from "react-native-youtube-iframe";
 import { DeleteConfirmSheet, DeleteConfirmSheetRef } from "../../src/components/DeleteConfirmSheet";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
 import Feather from "@expo/vector-icons/Feather";
@@ -70,7 +77,8 @@ type CardType =
   | "todo"
   | "place"
   | "gif"
-  | "video";
+  | "video"
+  | "audio";
 
 const CARD_TYPE_OPTIONS: { type: CardType; icon: keyof typeof Feather.glyphMap; label: string }[] = [
   { type: "text-titled", icon: "type", label: "Note" },
@@ -81,6 +89,7 @@ const CARD_TYPE_OPTIONS: { type: CardType; icon: keyof typeof Feather.glyphMap; 
   { type: "place", icon: "map-pin", label: "Place" },
   { type: "gif", icon: "film", label: "GIF" },
   { type: "video", icon: "video", label: "Video" },
+  { type: "audio", icon: "music", label: "Audio" },
 ];
 
 // ─── Supplemental data state ──────────────────────────────────────────────────
@@ -90,6 +99,7 @@ type SupData = {
   mediaItemsMap: Record<number, CanvasMediaItem[]>;
   linkMetaMap: Record<number, CanvasLinkMeta | null>;
   placeMetaMap: Record<number, CanvasPlaceMeta | null>;
+  audioMetaMap: Record<number, CanvasAudioMeta | null>;
 };
 
 // ─── TextTitled card content ──────────────────────────────────────────────────
@@ -123,26 +133,32 @@ const AR_VALUES: Record<string, number> = { "1:1": 1, "3:2": 2 / 3, "2:3": 3 / 2
 
 
 function ImageContent({
-  node, mediaItems, cardW,
+  node, mediaItems, cardW, cardWidthSV,
 }: {
-  node: CanvasNode; mediaItems: CanvasMediaItem[]; cardW: number;
+  node: CanvasNode; mediaItems: CanvasMediaItem[]; cardW: number; cardWidthSV: SharedValue<number>;
 }) {
   const arValue = AR_VALUES[node.aspectRatio] ?? 2 / 3;
-  const imgH = Math.min(Math.round(cardW * arValue), 300);
+  // Dimensions bound to the live card width → resizing keeps the aspect ratio.
+  const mediaStyle = useAnimatedStyle(() => ({
+    width: cardWidthSV.value,
+    height: cardWidthSV.value * arValue,
+  }));
   if (!mediaItems.length) {
     return (
-      <View style={[contentStyles.imgPlaceholder, { height: imgH }]}>
+      <Animated.View style={[contentStyles.imgPlaceholder, mediaStyle]}>
         <Feather name="image" size={32} color={colors.neutralLight} />
         <Text style={contentStyles.placeholderLabel} numberOfLines={1}>{node.aspectRatio}</Text>
-      </View>
+      </Animated.View>
     );
   }
   return (
     <>
       <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}
-        style={{ marginHorizontal: -spacing.md, marginTop: -spacing.md, width: cardW }}>
+        style={{ marginHorizontal: -spacing.md, marginTop: -spacing.md }}>
         {mediaItems.map((m) => (
-          <Image key={m.id} source={{ uri: m.uri }} style={{ width: cardW, height: imgH }} resizeMode="cover" />
+          <Animated.View key={m.id} style={mediaStyle}>
+            <Image source={{ uri: m.uri }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+          </Animated.View>
         ))}
       </ScrollView>
       {!!node.title?.trim() && node.title !== "New card" && (
@@ -226,13 +242,16 @@ function TodoContent({
 // ─── Place card content ───────────────────────────────────────────────────────
 
 function PlaceContent({
-  node, mediaItems, placeMeta, cardW,
+  node, mediaItems, placeMeta, cardW, cardWidthSV,
 }: {
   node: CanvasNode; mediaItems: CanvasMediaItem[]; placeMeta: CanvasPlaceMeta | null | undefined;
-  cardW: number;
+  cardW: number; cardWidthSV: SharedValue<number>;
 }) {
-  const PLACE_IMG_H = Math.round(cardW * 2 / 3);
   const mapsUrl = placeMeta?.googleMapsUrl ?? null;
+  const mediaStyle = useAnimatedStyle(() => ({
+    width: cardWidthSV.value,
+    height: cardWidthSV.value * 2 / 3,
+  }));
   return (
     <>
       {mediaItems.length > 0 ? (
@@ -240,16 +259,18 @@ function PlaceContent({
           horizontal
           pagingEnabled
           showsHorizontalScrollIndicator={false}
-          style={{ marginHorizontal: -spacing.md, marginTop: -spacing.md, width: cardW }}
+          style={{ marginHorizontal: -spacing.md, marginTop: -spacing.md }}
         >
           {mediaItems.map((m) => (
-            <Image key={m.id} source={{ uri: m.uri }} style={{ width: cardW, height: PLACE_IMG_H }} resizeMode="cover" />
+            <Animated.View key={m.id} style={mediaStyle}>
+              <Image source={{ uri: m.uri }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
+            </Animated.View>
           ))}
         </ScrollView>
       ) : (
-        <View style={[contentStyles.imgPlaceholder, { height: PLACE_IMG_H, width: cardW }]}>
+        <Animated.View style={[contentStyles.imgPlaceholder, mediaStyle]}>
           <Feather name="map-pin" size={28} color={colors.neutralLight} />
-        </View>
+        </Animated.View>
       )}
       <Text style={contentStyles.linkTitle} numberOfLines={2}>
         {placeMeta?.placeTitle ?? (node.title !== "New card" ? node.title : "")}
@@ -268,40 +289,43 @@ function PlaceContent({
 // ─── GIF card content ─────────────────────────────────────────────────────────
 
 const GIF_MIN_H = 60;
-const GIF_MAX_H = 320;
+const GIF_MAX_H = 800; // high cap so the gif keeps its natural aspect as the card resizes
 
-function GifContent({ mediaItems, cardW }: { mediaItems: CanvasMediaItem[]; cardW: number }) {
+function GifContent({ mediaItems, cardW, cardWidthSV }: { mediaItems: CanvasMediaItem[]; cardW: number; cardWidthSV: SharedValue<number> }) {
   const uri = mediaItems[0]?.uri ?? null;
-  const [gifH, setGifH] = useState(Math.round(cardW * 9 / 16));
+  // Store the natural aspect (height/width); dimensions bind to the live card width.
+  const aspect = useSharedValue(9 / 16);
 
   const handleLoad = (e: { source: { width: number; height: number } }) => {
     const { width, height } = e.source;
-    if (width > 0 && height > 0) {
-      const natural = Math.round(cardW * (height / width));
-      setGifH(Math.max(GIF_MIN_H, Math.min(GIF_MAX_H, natural)));
-    }
+    if (width > 0 && height > 0) aspect.value = height / width;
   };
+
+  const mediaStyle = useAnimatedStyle(() => ({
+    width: cardWidthSV.value,
+    height: Math.max(GIF_MIN_H, Math.min(GIF_MAX_H, cardWidthSV.value * aspect.value)),
+  }));
 
   if (!uri) {
     return (
-      <View style={[contentStyles.imgPlaceholder, { height: gifH }]}>
+      <Animated.View style={[contentStyles.imgPlaceholder, mediaStyle]}>
         <Feather name="film" size={28} color={colors.neutralLight} />
-      </View>
+      </Animated.View>
     );
   }
 
   // Container height matches the image's natural ratio → fill has zero letterboxing
   return (
-    <View style={[contentStyles.gifView, { width: cardW, height: gifH }]}>
+    <Animated.View style={[contentStyles.gifView, mediaStyle]}>
       <ExpoImage
         source={{ uri }}
-        style={{ width: cardW, height: gifH }}
+        style={{ width: "100%", height: "100%" }}
         contentFit="fill"
         autoplay
         recyclingKey={uri}
         onLoad={handleLoad}
       />
-    </View>
+    </Animated.View>
   );
 }
 
@@ -353,26 +377,90 @@ function VideoPlayerModal({ uri, onClose }: { uri: string; onClose: () => void }
   );
 }
 
+// Fullscreen YouTube video — same close behavior, but the player is an iframe.
+function FullscreenYoutubeModal({ videoId, onClose }: { videoId: string; onClose: () => void }) {
+  return (
+    <View style={{ flex: 1, backgroundColor: "#000", justifyContent: "center" }}>
+      {/* Tap the letterbox area to close; the player keeps its own controls */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <YoutubePlayer height={Math.round(SW * 9 / 16)} width={SW} videoId={videoId} play={true} />
+      <Pressable style={contentStyles.videoCloseBtn} onPress={onClose}>
+        <Feather name="x" size={22} color={colors.white} />
+      </Pressable>
+    </View>
+  );
+}
+
 // ─── Video card content ───────────────────────────────────────────────────────
 
 // VideoContent is now a pure display — double-tap on the card triggers the player
 // at the screen level via onInteractById → handleInteractById → fullScreenVideoUri
-function VideoContent({ mediaItems, cardW }: { mediaItems: CanvasMediaItem[]; cardW: number }) {
-  const uri = mediaItems[0]?.uri ?? null;
-  const videoH = Math.round(cardW * 9 / 16);
+function VideoContent({ mediaItems, cardW, cardWidthSV }: { mediaItems: CanvasMediaItem[]; cardW: number; cardWidthSV: SharedValue<number> }) {
+  const item = mediaItems[0];
+  const uri = item?.uri ?? null;
+  const isYt = item?.mediaType === "youtube";
+  const mediaStyle = useAnimatedStyle(() => ({
+    width: cardWidthSV.value,
+    height: cardWidthSV.value * 9 / 16,
+  }));
 
   if (!uri) {
     return (
-      <View style={[contentStyles.imgPlaceholder, { height: videoH }]}>
+      <Animated.View style={[contentStyles.imgPlaceholder, mediaStyle]}>
         <Feather name="video" size={28} color={colors.neutralLight} />
-      </View>
+      </Animated.View>
     );
   }
 
   return (
-    <View style={[contentStyles.videoThumb, { width: cardW, height: videoH }]}>
+    <Animated.View style={[contentStyles.videoThumb, mediaStyle]}>
+      {isYt && (
+        <Image
+          source={{ uri: `https://img.youtube.com/vi/${uri}/hqdefault.jpg` }}
+          style={StyleSheet.absoluteFill}
+          resizeMode="cover"
+        />
+      )}
       <View style={contentStyles.videoPlayBtn}>
         <Feather name="play" size={22} color={colors.white} />
+      </View>
+    </Animated.View>
+  );
+}
+
+// ─── Audio card content ───────────────────────────────────────────────────────
+
+function AudioContent({
+  node, audioMeta, active, playing,
+}: {
+  node: CanvasNode;
+  audioMeta: CanvasAudioMeta | null | undefined;
+  active: boolean;
+  playing: boolean;
+}) {
+  const title =
+    (node.title && node.title !== "New card" ? node.title.trim() : "") ||
+    audioMeta?.title?.trim() ||
+    "Audio track";
+  const hasSource = !!audioMeta;
+  const isPlaying = active && playing;
+  // Non-interactive indicator — single tap opens the sheet, double-tap plays.
+  return (
+    <View style={contentStyles.audioRow}>
+      <View style={[contentStyles.audioPlayBtn, active && contentStyles.audioPlayBtnActive]}>
+        <Feather
+          name={!hasSource ? "music" : isPlaying ? "pause" : "play"}
+          size={18}
+          color={hasSource ? colors.white : colors.neutralLight}
+          // The play triangle is right-heavy — nudge it to sit optically centered.
+          style={{ marginLeft: hasSource && !isPlaying ? 2 : 0 }}
+        />
+      </View>
+      <View style={contentStyles.audioTextCol}>
+        <Text style={contentStyles.audioTitle} numberOfLines={2}>{title}</Text>
+        <Text style={contentStyles.audioSub} numberOfLines={1}>
+          {!hasSource ? "Tap to add a file" : active ? (playing ? "Playing" : "Paused") : "Tap to play"}
+        </Text>
       </View>
     </View>
   );
@@ -409,9 +497,9 @@ const DOT_SHADER_SRC = `
 function DotGridBackground({
   translateX, translateY, scale,
 }: {
-  translateX: Animated.SharedValue<number>;
-  translateY: Animated.SharedValue<number>;
-  scale: Animated.SharedValue<number>;
+  translateX: SharedValue<number>;
+  translateY: SharedValue<number>;
+  scale: SharedValue<number>;
 }) {
   const dotShader = useMemo(() => {
     try { return Skia.RuntimeEffect.Make(DOT_SHADER_SRC); } catch { return null; }
@@ -528,10 +616,10 @@ function buildConnPaths(
 function ConnectionsSkiaLayer({
   connRenderData, translateX, translateY, scale, showXButtons,
 }: {
-  connRenderData: Animated.SharedValue<ConnRenderData>;
-  translateX: Animated.SharedValue<number>;
-  translateY: Animated.SharedValue<number>;
-  scale: Animated.SharedValue<number>;
+  connRenderData: SharedValue<ConnRenderData>;
+  translateX: SharedValue<number>;
+  translateY: SharedValue<number>;
+  scale: SharedValue<number>;
   showXButtons: boolean;
 }) {
   // Local shared values — tracked reliably within this component's worklets
@@ -656,9 +744,9 @@ const DrawerMiniPreview = React.memo(function DrawerMiniPreview({ node, supData 
 });
 
 const DrawerCardItem = React.memo(function DrawerCardItem({
-  index, node, supData, isDeleteMode, onPress, onLongPress, onDelete,
+  number, node, supData, isDeleteMode, onPress, onLongPress, onDelete,
 }: {
-  index: number; node: CanvasNode; supData: SupData; isDeleteMode: boolean;
+  number: number; node: CanvasNode; supData: SupData; isDeleteMode: boolean;
   onPress: () => void; onLongPress: () => void; onDelete: () => void;
 }) {
   const cfg = TYPE_CONFIG[node.cardType] ?? TYPE_CONFIG["text-titled"];
@@ -666,7 +754,7 @@ const DrawerCardItem = React.memo(function DrawerCardItem({
   const sub = getCardSubtitle(node, supData);
   return (
     <Pressable style={drawerStyles.listItem} onPress={onPress} onLongPress={onLongPress} delayLongPress={400}>
-      <Text style={drawerStyles.indexText}>{index}</Text>
+      <Text style={drawerStyles.frameNumber}>{number}</Text>
       <DrawerMiniPreview node={node} supData={supData} />
       <View style={drawerStyles.itemInfo}>
         <View style={drawerStyles.typeRow}>
@@ -687,9 +775,9 @@ const DrawerCardItem = React.memo(function DrawerCardItem({
 });
 
 function ComponentsDrawer({
-  nodes, supData, connections, onSelect, onDelete, onDeleteConnection, onClose,
+  frames, supData, connections, nodeMapAll, onSelect, onDelete, onDeleteConnection, onClose,
 }: {
-  nodes: CanvasNode[]; supData: SupData; connections: CanvasConnection[];
+  frames: CanvasNode[]; supData: SupData; connections: CanvasConnection[]; nodeMapAll: CanvasNode[];
   onSelect: (node: CanvasNode) => void;
   onDelete: (nodeId: number) => void;
   onDeleteConnection: (id: number) => void;
@@ -712,14 +800,38 @@ function ComponentsDrawer({
 
   const nodeMap = useMemo(() => {
     const m: Record<number, CanvasNode> = {};
-    nodes.forEach(n => { m[n.id] = n; });
+    nodeMapAll.forEach(n => { m[n.id] = n; });
     return m;
-  }, [nodes]);
+  }, [nodeMapAll]);
+
+  // Every URL on the board (link cards, YouTube audio/video, places) — shown as a
+  // dedicated "Links" section.
+  const linkItems = useMemo(() => {
+    const items: { key: string; title: string; url: string; icon: keyof typeof Feather.glyphMap }[] = [];
+    for (const n of nodeMapAll) {
+      if (n.cardType === "link") {
+        const m = supData.linkMetaMap[n.id];
+        if (m?.url) items.push({ key: `l${n.id}`, title: m.ogTitle || m.url, url: m.url, icon: "link" });
+      } else if (n.cardType === "audio") {
+        const m = supData.audioMetaMap[n.id];
+        if (m?.sourceType === "youtube" && m.youtubeVideoId)
+          items.push({ key: `a${n.id}`, title: m.title || "YouTube audio", url: `https://youtu.be/${m.youtubeVideoId}`, icon: "music" });
+      } else if (n.cardType === "video") {
+        const md = supData.mediaItemsMap[n.id]?.[0];
+        if (md?.mediaType === "youtube")
+          items.push({ key: `v${n.id}`, title: n.title && n.title !== "New card" ? n.title : "YouTube video", url: `https://youtu.be/${md.uri}`, icon: "youtube" });
+      } else if (n.cardType === "place") {
+        const m = supData.placeMetaMap[n.id];
+        if (m?.googleMapsUrl) items.push({ key: `p${n.id}`, title: m.placeTitle || "Place", url: m.googleMapsUrl, icon: "map-pin" });
+      }
+    }
+    return items;
+  }, [nodeMapAll, supData]);
 
   return (
     <View style={[drawerStyles.panel, { paddingTop: insets.top }]}>
       <View style={drawerStyles.drawerHeader}>
-        <Text style={drawerStyles.drawerTitle}>Layers</Text>
+        <Text style={drawerStyles.drawerTitle}>Frames · left-to-right order</Text>
         <Pressable onPress={onClose} hitSlop={10}>
           <Feather name="x" size={18} color={colors.neutralDarkDarkest} />
         </Pressable>
@@ -727,15 +839,17 @@ function ComponentsDrawer({
 
       {showNodes ? (
         <FlatList
-          data={nodes}
+          data={frames}
           keyExtractor={(n) => String(n.id)}
           contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
           initialNumToRender={8}
           maxToRenderPerBatch={6}
           windowSize={5}
           removeClippedSubviews
-          ListFooterComponent={showConnections && connections.length > 0 ? (
+          ListFooterComponent={showConnections ? (
             <View>
+              {connections.length > 0 && (
+              <View>
               <View style={drawerStyles.sectionHeader}>
                 <Feather name="link-2" size={11} color={colors.textMuted} />
                 <Text style={drawerStyles.sectionTitle}>Connections ({connections.length})</Text>
@@ -764,11 +878,36 @@ function ComponentsDrawer({
                   </Pressable>
                 );
               })}
+              </View>
+              )}
+
+              {linkItems.length > 0 && (
+                <View>
+                  <View style={drawerStyles.sectionHeader}>
+                    <Feather name="link" size={11} color={colors.textMuted} />
+                    <Text style={drawerStyles.sectionTitle}>Links ({linkItems.length})</Text>
+                  </View>
+                  {linkItems.map((item, i) => (
+                    <Pressable
+                      key={item.key}
+                      style={drawerStyles.connItem}
+                      onPress={() => WebBrowser.openBrowserAsync(item.url)}
+                    >
+                      <Text style={drawerStyles.indexText}>{i + 1}</Text>
+                      <Feather name={item.icon} size={12} color={colors.neutralDarkMedium} />
+                      <Text style={[drawerStyles.itemTitle, { flex: 1 }]} numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      <Feather name="external-link" size={12} color={colors.textMuted} />
+                    </Pressable>
+                  ))}
+                </View>
+              )}
             </View>
           ) : null}
           renderItem={({ item, index }) => (
             <DrawerCardItem
-              index={index + 1}
+              number={index + 1}
               node={item}
               supData={supData}
               isDeleteMode={deleteTargetId === item.id}
@@ -794,24 +933,35 @@ function ComponentsDrawer({
 
 type CardProps = {
   node: CanvasNode;
-  scale: Animated.SharedValue<number>;
+  scale: SharedValue<number>;
+  panRef: React.MutableRefObject<GestureType | undefined>;
   supData: SupData;
   highlighted: boolean;
   isConnectSource: boolean;
+  hidden: boolean;
+  childCount: number;
+  locked: boolean;
+  frameNumber?: number;
+  audioActive: boolean;
+  audioPlaying: boolean;
   onMoveById: (id: number, x: number, y: number) => void;
   onEditById: (id: number) => void;
   onDeleteById: (id: number) => void;
   onResizeById: (id: number, width: number) => void;
+  onResizeStart: (id: number) => void;
+  onResizeEnd: () => void;
   onToggleTodo: (nodeId: number, itemId: number, checked: boolean) => void;
   onInteractById: (id: number) => void;
+  onToggleCollapse: (id: number, collapsed: boolean) => void;
   onMeasureHeight: (nodeId: number, height: number) => void;
-  connRenderData: Animated.SharedValue<ConnRenderData>;
+  connRenderData: SharedValue<ConnRenderData>;
 };
 
 function CanvasCard({
-  node, scale, supData, highlighted, isConnectSource,
-  onMoveById, onEditById, onDeleteById, onResizeById,
-  onToggleTodo, onInteractById, onMeasureHeight, connRenderData,
+  node, scale, panRef, supData, highlighted, isConnectSource, hidden, childCount, locked, frameNumber,
+  audioActive, audioPlaying,
+  onMoveById, onEditById, onDeleteById, onResizeById, onResizeStart, onResizeEnd,
+  onToggleTodo, onInteractById, onToggleCollapse, onMeasureHeight, connRenderData,
 }: CardProps) {
   const absX = useSharedValue(node.x);
   const absY = useSharedValue(node.y);
@@ -827,27 +977,35 @@ function CanvasCard({
     cardWidth.value = node.width;
   }, [node.x, node.y, node.width]);
 
+  // Single tap = interact (play / open media / etc.); double tap = edit sheet.
+  // All card gestures are disabled in lock (viewer) mode.
   const doubleTap = Gesture.Tap()
+    .enabled(!locked)
     .numberOfTaps(2)
     .maxDuration(200)
-    .onEnd(() => { runOnJS(onInteractById)(node.id); });
+    .onEnd(() => { runOnJS(onEditById)(node.id); });
 
   const tapGesture = Gesture.Tap()
+    .enabled(!locked)
     .numberOfTaps(1)
     .maxDuration(200)
     .requireExternalGestureToFail(doubleTap)
-    .onEnd(() => { runOnJS(onEditById)(node.id); });
+    .onEnd(() => { runOnJS(onInteractById)(node.id); });
 
   const longPress = Gesture.LongPress()
+    .enabled(!locked)
     .minDuration(600)
     .onStart(() => { runOnJS(onDeleteById)(node.id); });
 
   const dragGesture = Gesture.Pan()
+    .enabled(!locked)
+    .blocksExternalGesture(panRef) // held drag moves the card, not the canvas
     .activateAfterLongPress(300)
     .onStart(() => {
       startX.value = absX.value;
       startY.value = absY.value;
-      cardOpacity.value = 0.75;
+      // Keep the card fully opaque while dragging (dimming let the dot-grid show
+      // through the white card and read as gray).
     })
     .onUpdate((e) => {
       absX.value = startX.value + e.translationX / scale.value;
@@ -862,24 +1020,54 @@ function CanvasCard({
     })
     .onFinalize(() => { cardOpacity.value = 1; });
 
+  // Top-right handle. Drag up/right to grow, down/left to shrink. Width changes in
+  // real time; media content height is bound to this same width (see media cards),
+  // so both dimensions resize together, keeping the aspect ratio.
   const resizeGesture = Gesture.Pan()
+    .enabled(!locked)
+    .blocksExternalGesture(panRef) // resizing shouldn't also pan the canvas
     .minPointers(1)
     .maxPointers(1)
-    .onStart(() => { startWidth.value = cardWidth.value; })
-    .onUpdate((e) => {
-      cardWidth.value = Math.max(MIN_CARD_W, Math.min(MAX_CARD_W,
-        startWidth.value + e.translationX / scale.value));
+    .hitSlop(14)
+    .onStart(() => {
+      startWidth.value = cardWidth.value;
+      runOnJS(onResizeStart)(node.id);
     })
-    .onEnd(() => { runOnJS(onResizeById)(node.id, cardWidth.value); });
+    .onUpdate((e) => {
+      // Horizontal drag drives width; media height is bound to width (aspect ratio).
+      const w = Math.max(MIN_CARD_W, Math.min(MAX_CARD_W, startWidth.value + e.translationX / scale.value));
+      cardWidth.value = w;
+      // Live width keeps arrows attached; height stays frozen (measurement is
+      // paused for this node during the resize) and settles exactly on release.
+      const cur = connRenderData.value;
+      connRenderData.value = {
+        ...cur,
+        positions: { ...cur.positions, [node.id]: { x: absX.value, y: absY.value, w } },
+      };
+    })
+    .onEnd(() => {
+      runOnJS(onResizeById)(node.id, cardWidth.value);
+      runOnJS(onResizeEnd)();
+    });
 
+  // Pan/zoom is handled by the single canvas-wide gesture that now wraps the cards
+  // (see render). The card only needs its own interactions; the long-press drag
+  // blocks the canvas pan so a held drag moves the card instead of panning.
   const gesture = Gesture.Race(dragGesture, longPress, doubleTap, tapGesture);
 
-  const cardStyle = useAnimatedStyle(() => ({
+  // Outer wrapper holds position; card keeps the width. The eye chip is a flow
+  // child below the card so the wrapper grows to include it (Android delivers
+  // touches only within a parent's bounds — an absolute chip below the card
+  // would be untappable).
+  const wrapperStyle = useAnimatedStyle(() => ({
     position: "absolute",
     left: absX.value,
     top: absY.value,
-    width: cardWidth.value,
     opacity: cardOpacity.value,
+    alignItems: "flex-end",
+  }));
+  const cardStyle = useAnimatedStyle(() => ({
+    width: cardWidth.value,
   }));
 
   const cardType = node.cardType as CardType;
@@ -888,36 +1076,72 @@ function CanvasCard({
   const mediaItems = supData.mediaItemsMap[node.id] ?? [];
   const linkMeta = supData.linkMetaMap[node.id];
   const placeMeta = supData.placeMetaMap[node.id];
+  const audioMeta = supData.audioMetaMap[node.id];
 
   const renderContent = () => {
     switch (cardType) {
       case "text-titled": return <TextTitledContent node={node} />;
       case "text-quote": return <TextQuoteContent node={node} />;
-      case "image": return <ImageContent node={node} mediaItems={mediaItems} cardW={cardW} />;
+      case "image": return <ImageContent node={node} mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
       case "link": return <LinkContent linkMeta={linkMeta} cardW={cardW} />;
       case "todo": return <TodoContent node={node} todoItems={todoItems} onToggle={(id, c) => onToggleTodo(node.id, id, c)} />;
-      case "place": return <PlaceContent node={node} mediaItems={mediaItems} placeMeta={placeMeta} cardW={cardW} />;
-      case "gif": return <GifContent mediaItems={mediaItems} cardW={cardW} />;
-      case "video": return <VideoContent mediaItems={mediaItems} cardW={cardW} />;
+      case "place": return <PlaceContent node={node} mediaItems={mediaItems} placeMeta={placeMeta} cardW={cardW} cardWidthSV={cardWidth} />;
+      case "gif": return <GifContent mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
+      case "video": return <VideoContent mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
+      case "audio": return <AudioContent node={node} audioMeta={audioMeta} active={audioActive} playing={audioPlaying} />;
       default: return <TextTitledContent node={node} />;
     }
   };
 
   return (
-    <GestureDetector gesture={gesture}>
-      <Animated.View
-        style={[styles.card, cardStyle, highlighted && styles.cardHighlighted, isConnectSource && styles.cardConnectSource]}
-        onLayout={(e) => onMeasureHeight(node.id, e.nativeEvent.layout.height)}
-      >
-        {renderContent()}
-        {/* Resize handle — inner GestureDetector takes priority over outer card gestures */}
-        <GestureDetector gesture={resizeGesture}>
-          <View style={styles.resizeHandle}>
-            <Feather name="chevrons-right" size={10} color={colors.neutralLight} />
-          </View>
-        </GestureDetector>
-      </Animated.View>
-    </GestureDetector>
+    // Hidden cards stay mounted + laid out (so no image reload / height thrash on
+    // re-show) but render invisible and non-interactive.
+    <Animated.View
+      style={[wrapperStyle, hidden && styles.cardHidden]}
+      pointerEvents={hidden ? "none" : "box-none"}
+    >
+      <GestureDetector gesture={gesture}>
+        <Animated.View
+          style={[styles.card, cardStyle, highlighted && styles.cardHighlighted, isConnectSource && styles.cardConnectSource]}
+          onLayout={(e) => onMeasureHeight(node.id, e.nativeEvent.layout.height)}
+          // In lock mode cards pass touches through so pan/zoom works anywhere.
+          pointerEvents={locked ? "none" : "auto"}
+        >
+          {renderContent()}
+          {/* Resize handle — inner GestureDetector takes priority over outer card gestures */}
+          <GestureDetector gesture={resizeGesture}>
+            <View style={styles.resizeHandle}>
+              <Feather name="chevrons-right" size={10} color={colors.neutralLight} />
+            </View>
+          </GestureDetector>
+        </Animated.View>
+      </GestureDetector>
+
+      {/* Eye chip — below the card, bottom-right. Plain Pressable (captures its own
+          tap, never opens the modal) and OUTSIDE the card's GestureDetector. White
+          fill so an arrow reads as passing under it. Only when it has children. */}
+      {childCount > 0 && !locked && (
+        <Pressable
+          style={styles.collapseChip}
+          hitSlop={10}
+          onPress={() => onToggleCollapse(node.id, !node.collapsed)}
+        >
+          <Feather
+            name={node.collapsed ? "eye-off" : "eye"}
+            size={24}
+            color={colors.neutralDarkMedium}
+          />
+          <Text style={styles.collapseChipText}>{childCount}</Text>
+        </Pressable>
+      )}
+
+      {/* Frame number badge (top-left) — only on frames (roots) that are ordered. */}
+      {frameNumber != null && (
+        <View style={styles.frameBadge} pointerEvents="none">
+          <Text style={styles.frameBadgeText}>{frameNumber}</Text>
+        </View>
+      )}
+    </Animated.View>
   );
 }
 
@@ -927,7 +1151,7 @@ function CardTypePicker({
   sheetRef,
   onSelect,
 }: {
-  sheetRef: React.RefObject<BottomSheetModal>;
+  sheetRef: React.RefObject<BottomSheetModal | null>;
   onSelect: (type: CardType) => void;
 }) {
   return (
@@ -964,6 +1188,105 @@ function CardTypePicker({
   );
 }
 
+// ─── Collapse visibility transform ────────────────────────────────────────────
+// Pure. Given all nodes + real connections, decide which nodes are hidden by a
+// collapsed node, and which arrows to draw. The connect / sever / Skia arrow code
+// is untouched — it just receives the filtered lists.
+//
+// Model (direction-based, "any parent"):
+//  • "children" of a node = the nodes it POINTS TO (outgoing arrows). Direction is
+//    set by pick order in connect mode (first-picked = the parent/source). It has
+//    nothing to do with which side a card sits on.
+//  • Pressing a node's eye hides its ENTIRE downstream branch (children, their
+//    children, …). A node is hidden if it is downstream of ANY collapsed node.
+//  • The collapsed node itself stays visible (shows the eye) unless it is itself
+//    inside another collapsed branch.
+//  • NO rerouting: an arrow is drawn only if BOTH endpoints are visible. Arrows
+//    touching a hidden node simply disappear (nothing snaps onto the collapsed
+//    card), so collapsing/expanding doesn't make the graph jump around. All
+//    visible arrows keep their real ids, so the X-sever always hits a real edge.
+type VisConn = { id: number; fromNodeId: number; toNodeId: number };
+function computeCanvasVisibility(
+  nodes: CanvasNode[],
+  connections: CanvasConnection[]
+): {
+  hidden: Set<number>;
+  visibleConnections: VisConn[];
+  childCount: Record<number, number>;
+} {
+  const childrenOf: Record<number, number[]> = {};
+  const childCount: Record<number, number> = {};
+  for (const c of connections) {
+    (childrenOf[c.fromNodeId] ??= []).push(c.toNodeId);
+    childCount[c.fromNodeId] = (childCount[c.fromNodeId] ?? 0) + 1;
+  }
+
+  // Hidden = everything downstream (following arrows) of ANY collapsed node.
+  const hidden = new Set<number>();
+  for (const n of nodes) {
+    if (!n.collapsed) continue;
+    const stack = [...(childrenOf[n.id] ?? [])];
+    while (stack.length) {
+      const d = stack.pop()!;
+      if (hidden.has(d)) continue;
+      hidden.add(d);
+      for (const ch of childrenOf[d] ?? []) stack.push(ch);
+    }
+  }
+
+  const visibleConnections: VisConn[] = connections
+    .filter((c) => !hidden.has(c.fromNodeId) && !hidden.has(c.toNodeId))
+    .map((c) => ({ id: c.id, fromNodeId: c.fromNodeId, toNodeId: c.toNodeId }));
+
+  return { hidden, visibleConnections, childCount };
+}
+
+// ─── YouTube helpers ──────────────────────────────────────────────────────────
+
+// Extract an 11-char video id from any common YouTube URL form (or a bare id).
+function extractYoutubeId(input: string): string | null {
+  const url = input.trim();
+  const m = url.match(
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/|music\.youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})/
+  );
+  if (m) return m[1];
+  if (/^[A-Za-z0-9_-]{11}$/.test(url)) return url;
+  return null;
+}
+
+// Title / author / thumbnail via YouTube's keyless oEmbed endpoint.
+async function fetchYoutubeOEmbed(url: string): Promise<{
+  title: string | null; author: string | null; thumbnail: string | null;
+} | null> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!res.ok) return null;
+    const j = await res.json();
+    return { title: j.title ?? null, author: j.author_name ?? null, thumbnail: j.thumbnail_url ?? null };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Frames (storyboard sequence) ─────────────────────────────────────────────
+// A "frame" = a root card (no incoming arrow). Sequence order is spatial: frames
+// are numbered left-to-right by their canvas x position (ties broken top-to-bottom,
+// then by creation). Arranging cards on the canvas IS ordering them.
+function getOrderedFrames(nodes: CanvasNode[], connections: CanvasConnection[]): CanvasNode[] {
+  const hasIncoming = new Set<number>();
+  for (const c of connections) hasIncoming.add(c.toNodeId);
+  return nodes
+    .filter((n) => !hasIncoming.has(n.id))
+    .sort((a, b) => {
+      if (Math.abs(a.x - b.x) > 1) return a.x - b.x;
+      if (Math.abs(a.y - b.y) > 1) return a.y - b.y;
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
+}
+
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 
 export default function CanvasEditorScreen() {
@@ -980,6 +1303,7 @@ export default function CanvasEditorScreen() {
     mediaItemsMap: {},
     linkMetaMap: {},
     placeMetaMap: {},
+    audioMetaMap: {},
   });
 
   // Camera transform
@@ -1029,10 +1353,17 @@ export default function CanvasEditorScreen() {
   const mediaUrlRef = useRef("");  // ref so handleAddMediaUrl always sees latest value
   const [editAspectRatio, setEditAspectRatio] = useState<"1:1" | "3:2" | "2:3">("3:2");
 
+  // Audio/video edit-sheet: source tab + the shared YouTube URL field
+  const [audioSourceTab, setAudioSourceTab] = useState<"local" | "youtube">("local");
+  const [videoYtMode, setVideoYtMode] = useState(false); // video sheet showing the YT input
+  const [youtubeUrlInput, setYoutubeUrlInput] = useState("");
+  const youtubeUrlRef = useRef("");
+
   // Full-screen image modal
   const [fullScreenUri, setFullScreenUri] = useState<string | null>(null);
   const [fullScreenGifUri, setFullScreenGifUri] = useState<string | null>(null);
   const [fullScreenVideoUri, setFullScreenVideoUri] = useState<string | null>(null);
+  const [fullScreenYoutubeId, setFullScreenYoutubeId] = useState<string | null>(null);
 
   // Drawer — mount first (off-screen), animate in after one frame so
   // the FlatList/images render while the panel is invisible, not during animation
@@ -1047,20 +1378,23 @@ export default function CanvasEditorScreen() {
   const connRenderData = useSharedValue<ConnRenderData>({ positions: {}, connections: [], heights: {} });
   const connectModeShared = useSharedValue(false);
   const renderTick = useSharedValue(0);
-  useEffect(() => {
-    connectModeShared.value = connectMode;
-    renderTick.value += 1; // force ConnectionsSkiaLayer worklet to re-evaluate showX
-  }, [connectMode]);
 
   useEffect(() => {
+    // Collapsed nodes drop the arrows into their hidden branch before the data
+    // reaches the (untouched) Skia worklet. All cards stay laid out (hidden ones
+    // just render invisible), so positions/heights come from every node.
+    const { visibleConnections } = computeCanvasVisibility(nodes, connections);
     const pos: Record<number, CardPos> = {};
     nodes.forEach(n => { pos[n.id] = { x: n.x, y: n.y, w: n.width }; });
     connRenderData.value = {
       positions: pos,
-      connections: connections.map(c => ({ id: c.id, fromNodeId: c.fromNodeId, toNodeId: c.toNodeId })),
+      connections: visibleConnections,
       heights: { ...cardHeights },
     };
     renderTick.value += 1;
+    // @ts-expect-error `connections` is intentionally declared below this effect — the dep
+    // array reading it as `undefined` is what makes the effect run once (see the notes at its
+    // declaration). Reordering would change canvas runtime behavior, so we keep the forward ref.
   }, [nodes, connections, cardHeights]);
 
 
@@ -1068,9 +1402,100 @@ export default function CanvasEditorScreen() {
   // Connect mode
   const [connections, setConnections] = useState<CanvasConnection[]>([]);
   const [connectMode, setConnectMode] = useState(false);
+  const [locked, setLocked] = useState(false); // viewer mode: pan/zoom + audio only
   const [pendingSourceId, setPendingSourceId] = useState<number | null>(null);
   const [connMidpoints, setConnMidpoints] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const pendingSourceIdRef = useRef<number | null>(null); // always-current for gestures
+
+  // Sync connect-mode into the shared value the connectTap worklet reads. MUST be
+  // declared AFTER `connectMode` — if it sits before the declaration the dep array
+  // reads `undefined` every render, so the effect only runs once and the worklet
+  // gets stuck seeing connectMode=false (severing silently no-ops).
+  useEffect(() => {
+    connectModeShared.value = connectMode;
+    renderTick.value += 1; // force ConnectionsSkiaLayer worklet to re-evaluate showX
+  }, [connectMode]);
+
+  // Which cards are hidden by a collapsed ancestor + each card's direct-child
+  // count (for the eye chip). Hidden cards stay mounted but render invisible.
+  const { hidden: hiddenNodeIds, childCount } = useMemo(
+    () => computeCanvasVisibility(nodes, connections),
+    [nodes, connections]
+  );
+
+  // Are all parent nodes currently collapsed? Drives the collapse-all/expand-all FAB.
+  const allChildrenHidden = useMemo(() => {
+    const parents = nodes.filter((n) => (childCount[n.id] ?? 0) > 0);
+    return parents.length > 0 && parents.every((n) => n.collapsed);
+  }, [nodes, childCount]);
+
+  // Frames (roots) in sequence order → number badge per frame.
+  const orderedFrames = useMemo(() => getOrderedFrames(nodes, connections), [nodes, connections]);
+  const frameNumbers = useMemo(() => {
+    const m: Record<number, number> = {};
+    orderedFrames.forEach((n, i) => { m[n.id] = i + 1; });
+    return m;
+  }, [orderedFrames]);
+
+
+  // ── Audio: one canvas-level player, one track at a time. Two backends —
+  //    expo-audio for local files, a hidden react-native-youtube-iframe for
+  //    YouTube. Only one is ever active; play/pause/seek route by source type. ──
+  const [activeAudioNodeId, setActiveAudioNodeId] = useState<number | null>(null);
+  const [youtubePlaying, setYoutubePlaying] = useState(false); // controls the YT player
+  const youtubeRef = useRef<YoutubeIframeRef>(null);
+
+  const activeMeta = activeAudioNodeId != null ? supData.audioMetaMap[activeAudioNodeId] : null;
+  const activeIsYoutube = activeMeta?.sourceType === "youtube";
+  const activeYoutubeId = activeIsYoutube ? (activeMeta?.youtubeVideoId ?? null) : null;
+  const activeLocalUri =
+    activeAudioNodeId != null && !activeIsYoutube
+      ? (supData.mediaItemsMap[activeAudioNodeId]?.[0]?.uri ?? null)
+      : null;
+
+  // Pass the raw uri string (a stable primitive) — an object literal would reload
+  // the track every render. Null when the active track is a YouTube one.
+  const audioPlayer = useAudioPlayer(activeLocalUri);
+  const audioStatus = useAudioPlayerStatus(audioPlayer);
+
+  const isActivePlaying = activeIsYoutube ? youtubePlaying : !!audioStatus?.playing;
+  const activeAudioTitle = activeMeta?.title ?? "Audio track";
+
+  // Auto-play local tracks when the selected local source changes.
+  useEffect(() => {
+    if (activeLocalUri) audioPlayer.play();
+  }, [activeLocalUri]);
+
+  const handleAudioToggle = useCallback((nodeId: number) => {
+    const meta = supData.audioMetaMap[nodeId];
+    const isYt = meta?.sourceType === "youtube";
+    if (activeAudioNodeId === nodeId) {
+      if (isYt) setYoutubePlaying((p) => !p);
+      else if (audioStatus?.playing) audioPlayer.pause();
+      else audioPlayer.play();
+    } else {
+      // Switch tracks — stop whichever backend was running, start the new one.
+      audioPlayer.pause();
+      setActiveAudioNodeId(nodeId);
+      setYoutubePlaying(isYt); // YT → plays new videoId; local → YT idle, effect plays local
+    }
+  }, [activeAudioNodeId, supData, audioStatus?.playing, audioPlayer]);
+
+  const handleAudioStop = useCallback(() => {
+    audioPlayer.pause();
+    setYoutubePlaying(false);
+    setActiveAudioNodeId(null);
+  }, [audioPlayer]);
+
+  const handleAudioSeek = useCallback(async (delta: number) => {
+    if (activeIsYoutube) {
+      const t = (await youtubeRef.current?.getCurrentTime()) ?? 0;
+      youtubeRef.current?.seekTo(Math.max(0, t + delta), true);
+    } else {
+      audioPlayer.seekTo(Math.max(0, (audioStatus?.currentTime ?? 0) + delta));
+    }
+  }, [activeIsYoutube, audioPlayer, audioStatus?.currentTime]);
+
   const drawerOffset = useSharedValue(DRAWER_W);
   const drawerAnimStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: drawerOffset.value }],
@@ -1152,12 +1577,13 @@ export default function CanvasEditorScreen() {
     const mediaMap: Record<number, CanvasMediaItem[]> = {};
     const linkMap: Record<number, CanvasLinkMeta | null> = {};
     const placeMap: Record<number, CanvasPlaceMeta | null> = {};
+    const audioMap: Record<number, CanvasAudioMeta | null> = {};
 
     await Promise.all(nodeList.map(async (n) => {
       if (n.cardType === "todo") {
         todoMap[n.id] = await getTodoItems(n.id);
       }
-      if (["image", "gif", "video", "place"].includes(n.cardType)) {
+      if (["image", "gif", "video", "place", "audio"].includes(n.cardType)) {
         mediaMap[n.id] = await getMediaItems(n.id);
       }
       if (n.cardType === "link") {
@@ -1166,6 +1592,9 @@ export default function CanvasEditorScreen() {
       if (n.cardType === "place") {
         placeMap[n.id] = await getPlaceMeta(n.id);
       }
+      if (n.cardType === "audio") {
+        audioMap[n.id] = await getAudioMeta(n.id);
+      }
     }));
 
     setSupData({
@@ -1173,10 +1602,15 @@ export default function CanvasEditorScreen() {
       mediaItemsMap: mediaMap,
       linkMetaMap: linkMap,
       placeMetaMap: placeMap,
+      audioMetaMap: audioMap,
     });
   };
 
   // ── Gestures ──────────────────────────────────────────────────────────────
+
+  // Ref for the canvas pan so a card's long-press drag can block it (move the card
+  // instead of panning). Quick drags still pan (drag needs the long-press first).
+  const panRef = useRef<GestureType | undefined>(undefined);
 
   const pinchGesture = Gesture.Pinch()
     .onStart((e) => {
@@ -1200,6 +1634,7 @@ export default function CanvasEditorScreen() {
     });
 
   const panGesture = Gesture.Pan()
+    .withRef(panRef)
     .minPointers(1)
     .maxPointers(1)
     .onStart(() => {
@@ -1242,6 +1677,85 @@ export default function CanvasEditorScreen() {
     await updateCanvasNode(nodeId, { width: w });
   }, []);
 
+  // While a card is being resized, ignore its onLayout height changes — otherwise
+  // the connRenderData effect rebuilds positions from the stale (uncommitted)
+  // width and fights the live resize update, making the arrows oscillate.
+  const resizingNodeIdRef = useRef<number | null>(null);
+  const handleResizeStart = useCallback((nodeId: number) => { resizingNodeIdRef.current = nodeId; }, []);
+  const handleResizeEnd = useCallback(() => { resizingNodeIdRef.current = null; }, []);
+
+  // Eye chip: collapse/expand a node's downstream branch. `collapsed` is the
+  // desired next state (passed from the card, which knows the current value).
+  const handleToggleCollapse = useCallback(async (nodeId: number, collapsed: boolean) => {
+    if (connectMode) return; // inert while wiring arrows
+    setNodes((prev) => prev.map((n) => n.id === nodeId ? { ...n, collapsed } : n));
+    await updateCanvasNode(nodeId, { collapsed });
+  }, [connectMode]);
+
+  // Collapse-all / expand-all: toggle every parent node's collapsed flag together.
+  const handleToggleAll = useCallback(async () => {
+    const parents = nodes.filter((n) => (childCount[n.id] ?? 0) > 0);
+    if (parents.length === 0) return;
+    const next = !parents.every((n) => n.collapsed); // collapse all unless already all collapsed
+    setNodes((prev) =>
+      prev.map((n) => ((childCount[n.id] ?? 0) > 0 ? { ...n, collapsed: next } : n))
+    );
+    await Promise.all(parents.map((n) => updateCanvasNode(n.id, { collapsed: next })));
+  }, [nodes, childCount]);
+
+  // Organize: lay frames out in a single evenly-spaced horizontal row, in their
+  // left-to-right order, all centered on one axis. Each frame's whole subtree
+  // (its references) is shifted by the same delta so clusters stay attached.
+  const handleOrganize = useCallback(async () => {
+    const frames = getOrderedFrames(nodes, connections);
+    if (frames.length === 0) return;
+
+    const childrenOf: Record<number, number[]> = {};
+    for (const c of connections) (childrenOf[c.fromNodeId] ??= []).push(c.toNodeId);
+    const descendantsOf = (rootId: number): number[] => {
+      const out: number[] = [];
+      const seen = new Set<number>();
+      const stack = [...(childrenOf[rootId] ?? [])];
+      while (stack.length) {
+        const d = stack.pop()!;
+        if (seen.has(d)) continue;
+        seen.add(d); out.push(d);
+        for (const ch of childrenOf[d] ?? []) stack.push(ch);
+      }
+      return out;
+    };
+
+    const GAP = 80;
+    const nodeById: Record<number, CanvasNode> = {};
+    nodes.forEach((n) => { nodeById[n.id] = n; });
+    const heightOf = (id: number) => cardHeights[id] ?? CARD_H_EST;
+
+    // Keep the row roughly where the frames already are.
+    const centerY = frames.reduce((s, f) => s + (f.y + heightOf(f.id) / 2), 0) / frames.length;
+    let cursorX = Math.min(...frames.map((f) => f.x));
+
+    const updates: Record<number, { x: number; y: number }> = {};
+    for (const f of frames) {
+      const newX = cursorX;
+      const newY = centerY - heightOf(f.id) / 2;
+      const dx = newX - f.x, dy = newY - f.y;
+      updates[f.id] = { x: newX, y: newY };
+      for (const cid of descendantsOf(f.id)) {
+        const cn = nodeById[cid];
+        if (cn) updates[cid] = { x: cn.x + dx, y: cn.y + dy };
+      }
+      cursorX += f.width + GAP;
+    }
+
+    const next = nodes.map((n) => (updates[n.id] ? { ...n, ...updates[n.id] } : n));
+    setNodes(next);
+    await Promise.all(
+      Object.entries(updates).map(([id, p]) => updateCanvasNode(Number(id), { x: p.x, y: p.y }))
+    );
+    // Frame the freshly organized row.
+    setTimeout(() => fitNodesToView(next), 60);
+  }, [nodes, connections, cardHeights]);
+
   const handleOpenDrawer = useCallback(() => {
     drawerOffset.value = DRAWER_W; // ensure off-screen before mount
     setDrawerMounted(true);
@@ -1255,15 +1769,35 @@ export default function CanvasEditorScreen() {
 
   const handlePanToCard = useCallback((node: CanvasNode) => {
     handleCloseDrawer();
-    const targetTx = SW / 2 - (node.x + node.width / 2) * scale.value;
-    const targetTy = SH / 2 - (node.y + 80) * scale.value;
-    translateX.value = withTiming(targetTx, { duration: 380 });
-    translateY.value = withTiming(targetTy, { duration: 380 });
+    // Zoom to fit the card in the usable area and center it (same math as the
+    // auto-fit on load, but for a single card).
+    const PADDING = 56;
+    const HEADER_H = 60;
+    const FAB_AREA = 110;
+    const USABLE_H = SH - HEADER_H - FAB_AREA;
+    const usableCenterY = HEADER_H + USABLE_H / 2;
+    const cardH = cardHeights[node.id] ?? CARD_H_EST;
+    const cx = node.x + node.width / 2;
+    const cy = node.y + cardH / 2;
+
+    const fit = Math.min(
+      (SW - 2 * PADDING) / node.width,
+      (USABLE_H - 2 * PADDING) / cardH,
+      MAX_SCALE
+    );
+    const s = Math.max(fit, MIN_SCALE);
+    const targetTx = -(cx - SW / 2) * s;
+    const targetTy = usableCenterY - (cy - SH / 2) * s - SH / 2;
+
+    scale.value = withTiming(s, { duration: 400 });
+    translateX.value = withTiming(targetTx, { duration: 400 });
+    translateY.value = withTiming(targetTy, { duration: 400 });
+    savedScale.value = s;
     savedTx.value = targetTx;
     savedTy.value = targetTy;
     setHighlightedNodeId(node.id);
     setTimeout(() => setHighlightedNodeId(null), 2000);
-  }, [handleCloseDrawer, scale, translateX, translateY, savedTx, savedTy]);
+  }, [handleCloseDrawer, scale, translateX, translateY, savedTx, savedTy, savedScale, cardHeights]);
 
   const handleDeleteFromDrawer = useCallback(async (nodeId: number) => {
     await deleteCanvasNode(nodeId);
@@ -1336,6 +1870,8 @@ export default function CanvasEditorScreen() {
     });
 
   const handleMeasureHeight = useCallback((nodeId: number, height: number) => {
+    if (resizingNodeIdRef.current === nodeId) return; // frozen during this card's resize
+    if (height < 1) return;
     setCardHeights((prev) => {
       if (Math.abs((prev[nodeId] ?? 0) - height) < 2) return prev;
       return { ...prev, [nodeId]: height };
@@ -1392,7 +1928,12 @@ export default function CanvasEditorScreen() {
         if (media[0]?.uri) setFullScreenGifUri(media[0].uri);
         break;
       case "video":
-        if (media[0]?.uri) setFullScreenVideoUri(media[0].uri);
+        if (media[0]?.mediaType === "youtube") {
+          handleAudioStop(); // avoid two YouTube players running at once
+          setFullScreenYoutubeId(media[0].uri);
+        } else if (media[0]?.uri) {
+          setFullScreenVideoUri(media[0].uri);
+        }
         break;
       case "link": {
         const m = supData.linkMetaMap[nodeId];
@@ -1404,9 +1945,16 @@ export default function CanvasEditorScreen() {
         if (m?.googleMapsUrl) WebBrowser.openBrowserAsync(m.googleMapsUrl);
         break;
       }
+      case "audio":
+        // Playable if it has a local file or a YouTube source.
+        if (supData.audioMetaMap[nodeId]) handleAudioToggle(nodeId);
+        break;
       default: break;
     }
-  }, [connectMode, handleEditById, nodes, supData]);
+    // @ts-expect-error `handleEditById` is intentionally declared below — this forward
+    // reference in the dep array is deliberate; reordering would change hook order/behavior
+    // in the frozen canvas, so we keep the declaration where it is.
+  }, [connectMode, handleEditById, nodes, supData, handleAudioToggle, handleAudioStop]);
 
   const handleEditById = useCallback((nodeId: number) => {
     if (connectMode) {
@@ -1488,6 +2036,16 @@ export default function CanvasEditorScreen() {
     if (type === "gif" || type === "video") {
       setEditMediaItemsSynced(supData.mediaItemsMap[node.id] ?? []);
     }
+    if (type === "video") {
+      setVideoYtMode(supData.mediaItemsMap[node.id]?.[0]?.mediaType === "youtube");
+      youtubeUrlRef.current = "";
+      setYoutubeUrlInput("");
+    }
+    if (type === "audio") {
+      setAudioSourceTab(supData.audioMetaMap[node.id]?.sourceType === "youtube" ? "youtube" : "local");
+      youtubeUrlRef.current = "";
+      setYoutubeUrlInput("");
+    }
 
     editSheetRef.current?.present();
   };
@@ -1517,6 +2075,7 @@ export default function CanvasEditorScreen() {
       mediaItemsMap: { ...prev.mediaItemsMap, [node.id]: [] },
       linkMetaMap: { ...prev.linkMetaMap, [node.id]: null },
       placeMetaMap: { ...prev.placeMetaMap, [node.id]: null },
+      audioMetaMap: { ...prev.audioMetaMap, [node.id]: null },
     }));
     openEditSheet(node);
   }, [fileId, translateX, translateY, scale]);
@@ -1642,9 +2201,8 @@ export default function CanvasEditorScreen() {
     if (!editingNode) return;
     const fn = camera ? ImagePicker.launchCameraAsync : ImagePicker.launchImageLibraryAsync;
     const type = editingNode.cardType as CardType;
-    const mediaTypes = type === "video"
-      ? ImagePicker.MediaTypeOptions.Videos
-      : ImagePicker.MediaTypeOptions.Images;
+    // SDK 56: MediaTypeOptions is deprecated — use an array of MediaType strings.
+    const mediaTypes: ImagePicker.MediaType[] = type === "video" ? ["videos"] : ["images"];
     const result = await fn({ quality: 0.8, mediaTypes });
     if (result.canceled) return;
     const mediaType = type === "gif" ? "gif" : type === "video" ? "video" : "image";
@@ -1655,7 +2213,7 @@ export default function CanvasEditorScreen() {
       if (type === "gif" && uri.startsWith("content://")) {
         try {
           const ext = (asset.fileName?.split(".").pop() ?? "webp").toLowerCase();
-          const cached = `${FileSystem.cacheDirectory}gif_${Date.now()}.${ext}`;
+          const cached = `${cacheDirectory}gif_${Date.now()}.${ext}`;
           await FileSystem.copyAsync({ from: uri, to: cached });
           uri = cached;
         } catch {}
@@ -1684,6 +2242,69 @@ export default function CanvasEditorScreen() {
     await deleteMediaItem(itemId);
     setEditMediaItemsSynced((prev) => prev.filter((m) => m.id !== itemId));
   }, []);
+
+  const handlePickAudio = useCallback(async () => {
+    if (!editingNode) return;
+    const res = await DocumentPicker.getDocumentAsync({
+      type: "audio/*",
+      copyToCacheDirectory: true,
+    });
+    if (res.canceled || !res.assets?.[0]) return;
+    const asset = res.assets[0];
+    // One track per card — clear any existing file first.
+    const existing = await getMediaItems(editingNode.id);
+    for (const m of existing) await deleteMediaItem(m.id);
+    await createMediaItem(editingNode.id, asset.uri, "audio");
+    await saveAudioMeta(editingNode.id, {
+      sourceType: "local",
+      title: asset.name ?? "Audio track",
+    });
+    await loadSupData(nodes);
+  }, [editingNode, nodes]);
+
+  const handleAddYoutube = useCallback(async () => {
+    if (!editingNode) return;
+    const url = youtubeUrlRef.current.trim();
+    if (!url) return;
+    const id = extractYoutubeId(url);
+    if (!id) {
+      ToastAndroid.show("Not a valid YouTube link", ToastAndroid.SHORT);
+      return;
+    }
+    const meta = await fetchYoutubeOEmbed(url);
+    // Switching to YouTube — drop any local file for this card.
+    const existing = await getMediaItems(editingNode.id);
+    for (const m of existing) await deleteMediaItem(m.id);
+    await saveAudioMeta(editingNode.id, {
+      sourceType: "youtube",
+      youtubeVideoId: id,
+      title: meta?.title ?? "YouTube audio",
+      author: meta?.author ?? null,
+      thumbnailUrl: meta?.thumbnail ?? null,
+    });
+    await loadSupData(nodes);
+    youtubeUrlRef.current = "";
+    setYoutubeUrlInput("");
+  }, [editingNode, nodes]);
+
+  const handleAddVideoYoutube = useCallback(async () => {
+    if (!editingNode) return;
+    const url = youtubeUrlRef.current.trim();
+    if (!url) return;
+    const id = extractYoutubeId(url);
+    if (!id) {
+      ToastAndroid.show("Not a valid YouTube link", ToastAndroid.SHORT);
+      return;
+    }
+    // Single source per video card — replace any existing media with the YT id.
+    const existing = await getMediaItems(editingNode.id);
+    for (const m of existing) await deleteMediaItem(m.id);
+    const item = await createMediaItem(editingNode.id, id, "youtube");
+    setEditMediaItemsSynced([item]);
+    await loadSupData(nodes);
+    youtubeUrlRef.current = "";
+    setYoutubeUrlInput("");
+  }, [editingNode, nodes]);
 
   // ── Edit sheet content ────────────────────────────────────────────────────
 
@@ -1860,7 +2481,9 @@ export default function CanvasEditorScreen() {
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={editStyles.mediaScroll}>
               {editMediaItems.map((m) => (
                 <View key={m.id} style={editStyles.mediaTile}>
-                  {m.uri.startsWith("http") ? (
+                  {m.mediaType === "youtube" ? (
+                    <Image source={{ uri: `https://img.youtube.com/vi/${m.uri}/default.jpg` }} style={editStyles.mediaTileImg} />
+                  ) : m.uri.startsWith("http") ? (
                     <View style={editStyles.mediaTileUrl}>
                       <Feather name="link" size={14} color={colors.primary} />
                       <Text style={editStyles.mediaTileUrlText} numberOfLines={2}>
@@ -1878,27 +2501,39 @@ export default function CanvasEditorScreen() {
             </ScrollView>
           )}
           <View style={editStyles.mediaActions}>
-            <Pressable style={editStyles.mediaBtn} onPress={() => handlePickImage(false)}>
+            <Pressable style={editStyles.mediaBtn} onPress={() => { setVideoYtMode(false); handlePickImage(false); }}>
               <Feather name="image" size={16} color={colors.primary} />
               <Text style={editStyles.mediaBtnText}>Gallery</Text>
             </Pressable>
-            <Pressable style={editStyles.mediaBtn} onPress={() => handlePickImage(true)}>
+            <Pressable style={editStyles.mediaBtn} onPress={() => { setVideoYtMode(false); handlePickImage(true); }}>
               <Feather name="camera" size={16} color={colors.primary} />
               <Text style={editStyles.mediaBtnText}>Camera</Text>
             </Pressable>
+            {type === "video" && (
+              <Pressable
+                style={[editStyles.mediaBtn, videoYtMode && editStyles.arBtnActive]}
+                onPress={() => setVideoYtMode(true)}
+              >
+                <Feather name="youtube" size={16} color={colors.primary} />
+                <Text style={editStyles.mediaBtnText}>YouTube</Text>
+              </Pressable>
+            )}
           </View>
-          <BottomSheetTextInput
-            style={styles.editInput}
-            value={mediaUrlInput}
-            onChangeText={(t) => { mediaUrlRef.current = t; setMediaUrlInput(t); }}
-            placeholder="Or paste URL, press Go ↵"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="none"
-            keyboardType="url"
-            returnKeyType="go"
-            onSubmitEditing={handleAddMediaUrl}
-            blurOnSubmit={false}
-          />
+          {type === "video" && videoYtMode && (
+            <BottomSheetTextInput
+              style={styles.editInput}
+              value={youtubeUrlInput}
+              onChangeText={(t) => { youtubeUrlRef.current = t; setYoutubeUrlInput(t); }}
+              placeholder="Paste YouTube link, press Go ↵"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="go"
+              onSubmitEditing={handleAddVideoYoutube}
+              blurOnSubmit={false}
+            />
+          )}
         </>
       );
     }
@@ -1974,6 +2609,80 @@ export default function CanvasEditorScreen() {
       );
     }
 
+    if (type === "audio") {
+      const meta = supData.audioMetaMap[editingNode.id];
+      const file = supData.mediaItemsMap[editingNode.id]?.[0];
+      const isYt = meta?.sourceType === "youtube";
+      return (
+        <>
+          <Text style={styles.editSheetTitle}>Edit Audio</Text>
+          <BottomSheetTextInput
+            style={styles.editInput}
+            value={editTitle}
+            onChangeText={setEditTitle}
+            placeholder="Title (optional)"
+            placeholderTextColor={colors.textMuted}
+          />
+          {/* Source toggle */}
+          <View style={editStyles.arRow}>
+            <Pressable
+              style={[editStyles.arBtn, audioSourceTab === "local" && editStyles.arBtnActive]}
+              onPress={() => setAudioSourceTab("local")}
+            >
+              <Text style={[editStyles.arBtnText, audioSourceTab === "local" && editStyles.arBtnTextActive]}>Local file</Text>
+            </Pressable>
+            <Pressable
+              style={[editStyles.arBtn, audioSourceTab === "youtube" && editStyles.arBtnActive]}
+              onPress={() => setAudioSourceTab("youtube")}
+            >
+              <Text style={[editStyles.arBtnText, audioSourceTab === "youtube" && editStyles.arBtnTextActive]}>YouTube</Text>
+            </Pressable>
+          </View>
+
+          {audioSourceTab === "local" ? (
+            <>
+              {file ? (
+                <View style={editStyles.audioFileRow}>
+                  <Feather name="music" size={16} color={colors.primary} />
+                  <Text style={editStyles.audioFileName} numberOfLines={1}>{meta?.title ?? "Audio file"}</Text>
+                </View>
+              ) : (
+                <Text style={editStyles.audioHint}>No file yet — pick one below.</Text>
+              )}
+              <View style={editStyles.mediaActions}>
+                <Pressable style={editStyles.mediaBtn} onPress={handlePickAudio}>
+                  <Feather name="folder" size={16} color={colors.primary} />
+                  <Text style={editStyles.mediaBtnText}>{file ? "Replace file" : "Pick audio file"}</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              {isYt && (
+                <View style={editStyles.audioFileRow}>
+                  <Feather name="youtube" size={16} color={colors.primary} />
+                  <Text style={editStyles.audioFileName} numberOfLines={1}>{meta?.title ?? "YouTube audio"}</Text>
+                </View>
+              )}
+              <BottomSheetTextInput
+                style={styles.editInput}
+                value={youtubeUrlInput}
+                onChangeText={(t) => { youtubeUrlRef.current = t; setYoutubeUrlInput(t); }}
+                placeholder="Paste YouTube link, press Go ↵"
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                returnKeyType="go"
+                onSubmitEditing={handleAddYoutube}
+                blurOnSubmit={false}
+              />
+            </>
+          )}
+        </>
+      );
+    }
+
     return null;
   };
 
@@ -1993,37 +2702,49 @@ export default function CanvasEditorScreen() {
         showXButtons={connectMode}
       />
 
-      {/* Layer 1: Full-screen gesture receiver */}
+      {/* Gesture receiver WRAPS the transformed card content, so camera pan/zoom
+          (and connect-tap severing) work over cards too — a two-finger pinch with
+          fingers on different cards reaches this single canvas-wide pinch. */}
       <GestureDetector gesture={Gesture.Race(connectTap, canvasGesture)}>
-        <View style={[StyleSheet.absoluteFill, styles.gestureLayer]} />
-      </GestureDetector>
-
-      {/* Layer 2: Transformed canvas content (cards, connections) */}
-      <Animated.View
-        style={[StyleSheet.absoluteFill, canvasStyle]}
-        pointerEvents="box-none"
-      >
+        <View style={StyleSheet.absoluteFill}>
+          <View style={[StyleSheet.absoluteFill, styles.gestureLayer]} />
+          <Animated.View
+            style={[StyleSheet.absoluteFill, canvasStyle]}
+            pointerEvents="box-none"
+          >
 
         {nodes.map((node) => (
           <CanvasCard
             key={node.id}
             node={node}
             scale={scale}
+            panRef={panRef}
             supData={supData}
             highlighted={node.id === highlightedNodeId}
             isConnectSource={node.id === pendingSourceId}
+            hidden={hiddenNodeIds.has(node.id)}
+            childCount={childCount[node.id] ?? 0}
+            locked={locked}
+            frameNumber={frameNumbers[node.id]}
+            audioActive={node.id === activeAudioNodeId}
+            audioPlaying={isActivePlaying}
             onMoveById={handleMoveById}
             onEditById={handleEditById}
             onDeleteById={handleDeleteById}
             onResizeById={handleResizeById}
+            onResizeStart={handleResizeStart}
+            onResizeEnd={handleResizeEnd}
             onToggleTodo={handleToggleTodo}
             onInteractById={handleInteractById}
+            onToggleCollapse={handleToggleCollapse}
             onMeasureHeight={handleMeasureHeight}
             connRenderData={connRenderData}
           />
         ))}
 
-      </Animated.View>
+          </Animated.View>
+        </View>
+      </GestureDetector>
 
       {/* Fixed UI: header */}
       <SafeAreaView style={styles.overlay} edges={["top"]} pointerEvents="box-none">
@@ -2042,7 +2763,8 @@ export default function CanvasEditorScreen() {
 
       {/* Add card FAB */}
       <Pressable
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
+        style={[styles.fab, { bottom: insets.bottom + 24 }, locked && styles.fabDisabled]}
+        disabled={locked}
         onPress={handleFabPress}
       >
         <Text style={styles.fabIcon}>+</Text>
@@ -2055,7 +2777,9 @@ export default function CanvasEditorScreen() {
           styles.connectFab,
           { bottom: insets.bottom + 24 + 56 + 12 },
           connectMode && styles.connectFabActive,
+          locked && styles.fabDisabled,
         ]}
+        disabled={locked}
         onPress={() => {
           if (connectMode) { setConnectMode(false); pendingSourceIdRef.current = null; setPendingSourceId(null); }
           else setConnectMode(true);
@@ -2067,6 +2791,102 @@ export default function CanvasEditorScreen() {
           color={connectMode ? colors.white : colors.primary}
         />
       </Pressable>
+
+      {/* Lock (viewer) mode FAB — above the connect FAB. Always enabled. */}
+      <Pressable
+        style={[
+          styles.fab,
+          styles.connectFab,
+          { bottom: insets.bottom + 24 + (56 + 12) * 2 },
+          locked && styles.connectFabActive,
+        ]}
+        onPress={() => {
+          const next = !locked;
+          setLocked(next);
+          if (next && connectMode) {
+            setConnectMode(false);
+            pendingSourceIdRef.current = null;
+            setPendingSourceId(null);
+          }
+        }}
+      >
+        <Feather
+          name={locked ? "lock" : "unlock"}
+          size={20}
+          color={locked ? colors.white : colors.primary}
+        />
+      </Pressable>
+
+      {/* Collapse-all / expand-all FAB — above the lock FAB */}
+      <Pressable
+        style={[
+          styles.fab,
+          styles.connectFab,
+          { bottom: insets.bottom + 24 + (56 + 12) * 3 },
+          locked && styles.fabDisabled,
+        ]}
+        disabled={locked}
+        onPress={handleToggleAll}
+      >
+        <Feather
+          name={allChildrenHidden ? "eye" : "eye-off"}
+          size={20}
+          color={colors.primary}
+        />
+      </Pressable>
+
+      {/* Organize FAB — lay frames out in a horizontal storyboard row */}
+      <Pressable
+        style={[
+          styles.fab,
+          styles.connectFab,
+          { bottom: insets.bottom + 24 + (56 + 12) * 4 },
+          locked && styles.fabDisabled,
+        ]}
+        disabled={locked}
+        onPress={handleOrganize}
+      >
+        <Feather name="columns" size={20} color={colors.primary} />
+      </Pressable>
+
+      {/* Now-playing bar — bottom-left, left of the FABs */}
+      {activeAudioNodeId != null && (
+        <View style={[styles.nowPlaying, { bottom: insets.bottom + 24 }]}>
+          <Feather name="music" size={16} color={colors.primary} />
+          <Text style={styles.nowPlayingTitle} numberOfLines={1}>{activeAudioTitle}</Text>
+          <Pressable hitSlop={8} onPress={() => handleAudioSeek(-10)}>
+            <Feather name="rotate-ccw" size={16} color={colors.neutralDarkMedium} />
+          </Pressable>
+          <Pressable
+            hitSlop={8}
+            onPress={() => (activeAudioNodeId != null && handleAudioToggle(activeAudioNodeId))}
+          >
+            <Feather name={isActivePlaying ? "pause" : "play"} size={20} color={colors.primary} />
+          </Pressable>
+          <Pressable hitSlop={8} onPress={() => handleAudioSeek(10)}>
+            <Feather name="rotate-cw" size={16} color={colors.neutralDarkMedium} />
+          </Pressable>
+          <Pressable hitSlop={8} onPress={handleAudioStop}>
+            <Feather name="x" size={16} color={colors.textMuted} />
+          </Pressable>
+        </View>
+      )}
+
+      {/* Hidden YouTube player — off-screen so only the audio is heard while you
+          view the board. Mounted only when a YouTube track is active. */}
+      {activeYoutubeId && (
+        <View style={styles.hiddenYoutube} pointerEvents="none">
+          <YoutubePlayer
+            ref={youtubeRef}
+            height={200}
+            width={320}
+            videoId={activeYoutubeId}
+            play={youtubePlaying}
+            onChangeState={(state: string) => { if (state === "ended") setYoutubePlaying(false); }}
+            initialPlayerParams={{ controls: false, modestbranding: true }}
+          />
+        </View>
+      )}
 
       {/* Card type picker */}
       <CardTypePicker sheetRef={pickerSheetRef} onSelect={handleSelectCardType} />
@@ -2087,9 +2907,15 @@ export default function CanvasEditorScreen() {
           keyboardShouldPersistTaps="handled"
         >
           {renderEditContent()}
-          <Pressable style={[styles.saveBtn, { marginTop: spacing.md }]} onPress={handleSaveEdit}>
-            <Text style={styles.saveBtnText}>Done</Text>
-          </Pressable>
+          {/* Done is hidden in the YouTube URL contexts — the link is submitted
+              with the keyboard Go key, so a Done button here does nothing useful. */}
+          {!(editingNode &&
+             ((editingNode.cardType === "audio" && audioSourceTab === "youtube") ||
+              (editingNode.cardType === "video" && videoYtMode))) && (
+            <Pressable style={[styles.saveBtn, { marginTop: spacing.md }]} onPress={handleSaveEdit}>
+              <Text style={styles.saveBtnText}>Done</Text>
+            </Pressable>
+          )}
           <Pressable
             style={styles.deleteCardBtn}
             onPress={async () => {
@@ -2150,6 +2976,12 @@ export default function CanvasEditorScreen() {
         </Modal>
       )}
 
+      {!!fullScreenYoutubeId && (
+        <Modal visible animationType="fade" onRequestClose={() => setFullScreenYoutubeId(null)}>
+          <FullscreenYoutubeModal videoId={fullScreenYoutubeId} onClose={() => setFullScreenYoutubeId(null)} />
+        </Modal>
+      )}
+
       {/* Drawer backdrop */}
       {drawerMounted && (
         <Pressable
@@ -2165,9 +2997,10 @@ export default function CanvasEditorScreen() {
           renderToHardwareTextureAndroid
         >
           <ComponentsDrawer
-            nodes={nodes}
+            frames={orderedFrames}
             supData={supData}
             connections={connections}
+            nodeMapAll={nodes}
             onSelect={handlePanToCard}
             onDelete={handleDeleteFromDrawer}
             onDeleteConnection={handleDeleteConnection}
@@ -2341,6 +3174,25 @@ const contentStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  audioRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  audioPlayBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.neutralLight,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  audioPlayBtnActive: {
+    backgroundColor: colors.primary,
+  },
+  audioTextCol: { flex: 1 },
+  audioTitle: { ...typography.h5, color: colors.neutralDarkDarkest },
+  audioSub: { ...typography.bodyXS, color: colors.textMuted, marginTop: 2 },
   videoCloseBtn: {
     position: "absolute",
     top: 48,
@@ -2440,6 +3292,18 @@ const editStyles = StyleSheet.create({
     borderColor: colors.border,
   },
   mediaBtnText: { ...typography.actionS, color: colors.primary },
+  audioFileRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: spacing.sm,
+  },
+  audioFileName: { ...typography.bodyM, color: colors.neutralDarkDarkest, flex: 1 },
+  audioHint: { ...typography.bodyS, color: colors.textMuted, marginBottom: spacing.sm },
   arRow: { flexDirection: "row", gap: 8, marginBottom: 4 },
   arBtn: {
     flex: 1,
@@ -2471,7 +3335,7 @@ const editStyles = StyleSheet.create({
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#F8FAFF" },
   gestureLayer: { backgroundColor: "rgba(248,250,255,0.01)" },
-  overlay: { ...StyleSheet.absoluteFillObject },
+  overlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0 },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -2492,13 +3356,13 @@ const styles = StyleSheet.create({
   },
   resizeHandle: {
     position: "absolute",
-    bottom: 0,
+    top: 0,
     right: 0,
-    width: 22,
-    height: 22,
+    width: 44,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
-    transform: [{ rotate: "45deg" }],
+    transform: [{ rotate: "-45deg" }],
   },
   cardHighlighted: {
     borderColor: colors.primary,
@@ -2530,6 +3394,37 @@ const styles = StyleSheet.create({
     minHeight: 60,
     overflow: "hidden",
   },
+  cardHidden: { opacity: 0 },
+  // Eye toggle: flow child below the card, right-aligned (wrapper is alignItems
+  // flex-end). No container — just a bigger eye icon + count. Flow child → the
+  // wrapper grows to include it, so it stays tappable.
+  collapseChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 8,
+    marginRight: 2,
+  },
+  collapseChipText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: colors.neutralDarkMedium,
+    fontVariant: ["tabular-nums"],
+  },
+  // Same treatment as the eye chip — outside the card at a corner, no container.
+  // Sits just above the card's top-left; blue.
+  frameBadge: {
+    position: "absolute",
+    bottom: "100%",
+    left: 2,
+    marginBottom: 2,
+  },
+  frameBadgeText: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: colors.primary,
+    fontVariant: ["tabular-nums"],
+  },
   fab: {
     position: "absolute",
     right: spacing.lg,
@@ -2550,7 +3445,29 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
+  fabDisabled: { opacity: 0.4 },
   fabIcon: { fontSize: 28, color: colors.white, lineHeight: 32, marginTop: -2 },
+  nowPlaying: {
+    position: "absolute",
+    left: 10,
+    right: 88, // clear the FAB column on the right
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.white,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    elevation: 6,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+  },
+  nowPlayingTitle: { ...typography.actionS, color: colors.neutralDarkDarkest, flex: 1 },
+  hiddenYoutube: { position: "absolute", top: -1000, left: 0, width: 320, height: 200 },
   sheetBg: { backgroundColor: colors.background, borderRadius: radius.xl, overflow: "hidden" },
   sheetHandle: { backgroundColor: colors.neutralLight },
   editSheet: {
@@ -2690,6 +3607,14 @@ const drawerStyles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  frameNumber: {
+    ...typography.h5,
+    color: colors.primary,
+    width: 22,
+    textAlign: "center",
+    fontVariant: ["tabular-nums"],
   },
   indexText: {
     ...typography.captionM,

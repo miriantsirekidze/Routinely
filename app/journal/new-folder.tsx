@@ -157,7 +157,7 @@ export default function NewFolderScreen() {
               <Text style={styles.label}>Name</Text>
               <TextInput
                 style={[styles.input, !!nameError && styles.inputError]}
-                placeholder={kind === "freeform" ? "e.g. Travel Diary, Daily Log…" : "e.g. Physique Journey, Finance…"}
+                placeholder={kind === "notes" ? "e.g. Travel Diary, Daily Log…" : "e.g. Physique Journey, Finance…"}
                 placeholderTextColor={colors.textMuted}
                 value={name}
                 onChangeText={(t) => { setName(t); if (nameError) setNameError(""); }}

@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, TextInput, Pressable,
-  ScrollView, Image, Switch, Modal, Dimensions,
+  ScrollView, Image, Switch, Modal, Dimensions, Keyboard,
 } from "react-native";
-import { KeyboardAwareScrollView } from "react-native-keyboard-aware-scroll-view";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import { AudioModule, useAudioRecorder, RecordingPresets, useAudioPlayer } from "expo-audio";
@@ -16,6 +15,7 @@ import {
 } from "../../src/db/journal";
 import { localDateStr } from "../../src/utils/date";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
+import RichTextEditor from "../../src/components/RichTextEditor";
 
 type FieldState = {
   textValue: string;
@@ -29,7 +29,6 @@ function defaultField(): FieldState {
 }
 
 const SCREEN_W = Dimensions.get("window").width;
-const SCREEN_H = Dimensions.get("window").height;
 
 // ─── Audio Player Sheet ──────────────────────────────────────────────────────
 
@@ -156,6 +155,20 @@ export default function EntryEditorScreen() {
 
   // Title debounce
   const titleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keyboard height. Expo forces edge-to-edge on Android, which defeats the manifest's
+  // `adjustResize` (the window no longer shrinks for the keyboard). We track the IME
+  // height ourselves and pad the screen by it, so the flex:1 description sits above the
+  // keyboard and its internal scroll keeps the cursor visible. The reported height excludes
+  // the bottom (nav-bar) inset, so we add it back to clear the keyboard's top action bar.
+  const insets = useSafeAreaInsets();
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", (e) =>
+      setKeyboardHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardDidHide", () => setKeyboardHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -290,53 +303,80 @@ export default function EntryEditorScreen() {
 
   if (!folder) return null;
 
-  const sortedVars = [...folder.variables].sort((a, b) =>
-    a.varType === "description" ? 1 : b.varType === "description" ? -1 : 0
-  );
+  // Description is rendered last, as a dedicated full-height field that fills the
+  // remaining space below the other fields and scrolls internally. Everything else
+  // is a compact field rendered above it.
+  const descVar = folder.variables.find((v) => v.varType === "description") ?? null;
+  const otherVars = folder.variables.filter((v) => v.varType !== "description");
+
+  const fieldCtx = {
+    update, pickImage,
+    openFullImage: (uri: string, varId: number) => { setFullScreenImage(uri); setFullScreenVarId(varId); },
+    startRecording, stopRecording, openPlayer,
+    isRecording, recordingVarId, elapsedSecs, fmtSecs,
+  };
 
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
-      <KeyboardAwareScrollView
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-        enableOnAndroid
-        extraScrollHeight={32}
-      >
-        {/* Minimal header: just back */}
-        <View style={styles.header}>
-          <Pressable onPress={() => router.back()}>
-            <Text style={styles.backText}>← Back</Text>
-          </Pressable>
-        </View>
+    <SafeAreaView
+      style={[styles.container, { paddingBottom: keyboardHeight > 0 ? keyboardHeight + insets.bottom : 0 }]}
+      edges={["top"]}
+    >
+      {/* Minimal header: just back */}
+      <View style={styles.header}>
+        <Pressable onPress={() => router.back()}>
+          <Text style={styles.backText}>← Back</Text>
+        </Pressable>
+      </View>
 
-        <View style={styles.divider} />
+      <View style={styles.divider} />
 
-        {/* Title */}
-        <TextInput
-          style={styles.entryTitle}
-          value={title}
-          onChangeText={handleTitleChange}
-          placeholder="Title"
-          placeholderTextColor={colors.neutralLightDark}
-        />
+      {/* Title */}
+      <TextInput
+        style={styles.entryTitle}
+        value={title}
+        onChangeText={handleTitleChange}
+        placeholder="Title"
+        placeholderTextColor={colors.neutralLightDark}
+      />
 
-        <View style={styles.divider} />
+      <View style={styles.divider} />
 
-        {/* Fields */}
-        {sortedVars.map((variable, idx) => (
-          <View key={variable.id}>
-            {renderField(variable, fields[variable.id] ?? defaultField(), {
-              update, pickImage,
-              openFullImage: (uri: string) => { setFullScreenImage(uri); setFullScreenVarId(variable.id); },
-              startRecording, stopRecording, openPlayer,
-              isRecording, recordingVarId, elapsedSecs, fmtSecs,
-              isLast: idx === sortedVars.length - 1,
-            })}
-            {idx < sortedVars.length - 1 && <View style={styles.divider} />}
-          </View>
-        ))}
-      </KeyboardAwareScrollView>
+      {/* Non-description fields. When a description follows, this region only takes
+          the space it needs (and can shrink/scroll); otherwise it fills the screen. */}
+      {otherVars.length > 0 && (
+        <ScrollView
+          style={descVar ? fieldStyles.otherFields : { flex: 1 }}
+          contentContainerStyle={fieldStyles.otherFieldsContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {otherVars.map((variable, idx) => (
+            <View key={variable.id}>
+              {renderField(variable, fields[variable.id] ?? defaultField(), {
+                ...fieldCtx,
+                openFullImage: (uri: string) => fieldCtx.openFullImage(uri, variable.id),
+              })}
+              {idx < otherVars.length - 1 && <View style={styles.divider} />}
+            </View>
+          ))}
+        </ScrollView>
+      )}
+
+      {/* Description — rich-text editor that fills the remaining height. Its toolbar sits
+          above the keyboard (the SafeAreaView is padded by the keyboard height, since Expo's
+          edge-to-edge Android defeats the manifest's adjustResize). */}
+      {descVar && (
+        <>
+          {otherVars.length > 0 && <View style={styles.divider} />}
+          <RichTextEditor
+            key={dbEntryId ?? "new"}
+            initialHTML={fields[descVar.id]?.textValue ?? ""}
+            onChange={(html) => update(descVar.id, { textValue: html })}
+            keyboardVisible={keyboardHeight > 0}
+            placeholder={descVar.name === "Content" ? "Write something…" : `${descVar.name}…`}
+          />
+        </>
+      )}
 
       {/* Image full-screen */}
       <Modal visible={!!fullScreenImage} transparent animationType="fade">
@@ -379,7 +419,7 @@ function renderField(variable: JournalVariable, state: FieldState, ctx: any) {
   const {
     update, pickImage, openFullImage,
     startRecording, stopRecording, openPlayer,
-    isRecording, recordingVarId, elapsedSecs, fmtSecs, isLast,
+    isRecording, recordingVarId, elapsedSecs, fmtSecs,
   } = ctx;
   const isThisRecording = recordingVarId === variable.id && isRecording;
 
@@ -488,33 +528,6 @@ function renderField(variable: JournalVariable, state: FieldState, ctx: any) {
         </View>
       );
 
-    case "description": {
-      const phText = variable.name === "Content" ? "Write something…" : `${variable.name}…`;
-      return (
-        // Wrapper provides spacing. TextInput has NO placeholder prop —
-        // a custom Text overlay with identical font metrics is used instead.
-        // This is the reliable Android fix: both elements share the exact same
-        // fontSize/lineHeight so the cursor never shifts between states.
-        <View style={[fieldStyles.descWrap, isLast && { minHeight: SCREEN_H * 0.35 }]}>
-          <View style={{ position: "relative" }}>
-            {!state.textValue && (
-              <Text style={fieldStyles.descPlaceholder} pointerEvents="none">
-                {phText}
-              </Text>
-            )}
-            <TextInput
-              style={fieldStyles.description}
-              value={state.textValue}
-              onChangeText={(t) => update(variable.id, { textValue: t })}
-              multiline
-              textAlignVertical="top"
-              scrollEnabled={false}
-            />
-          </View>
-        </View>
-      );
-    }
-
     default:
       return null;
   }
@@ -524,7 +537,6 @@ function renderField(variable: JournalVariable, state: FieldState, ctx: any) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  scroll: { flexGrow: 1 },
   header: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.sm },
   backText: { ...typography.actionM, color: colors.primary },
   divider: { height: 1, backgroundColor: colors.border },
@@ -600,30 +612,9 @@ const fieldStyles = StyleSheet.create({
     justifyContent: "center",
     marginRight: spacing.sm,
   },
-  descWrap: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.md,
-  },
-  // Identical font metrics to `description` — this is the key.
-  // Both elements must share the same fontSize, lineHeight, and padding
-  // so the cursor never shifts when transitioning from placeholder to typed text.
-  descPlaceholder: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    fontSize: 16,
-    color: colors.neutralLightDark,
-    padding: 0,
-  },
-  description: {
-    fontSize: 16,
-    color: colors.neutralDarkDarkest,
-    padding: 0,
-    textAlignVertical: "top",
-    minHeight: 22,
-  },
+  // Non-description fields sit above the description in a shrinkable region.
+  otherFields: { flexGrow: 0, flexShrink: 1 },
+  otherFieldsContent: { paddingBottom: spacing.sm },
 });
 
 const playerStyles = StyleSheet.create({

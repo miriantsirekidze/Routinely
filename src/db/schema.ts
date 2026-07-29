@@ -204,6 +204,8 @@ export const canvasNodes = sqliteTable("canvas_nodes", {
   width: real("width").notNull().default(220),
   cardType: text("card_type").notNull().default("text-titled"),
   aspectRatio: text("aspect_ratio").notNull().default("3:2"),
+  collapsed: integer("collapsed", { mode: "boolean" }).notNull().default(false),
+  seqOrder: integer("seq_order"), // frame sequence order (roots only); null = unordered
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -252,6 +254,18 @@ export const canvasPlaceMeta = sqliteTable("canvas_place_meta", {
   placeTitle: text("place_title"),
   googleMapsUrl: text("google_maps_url"),
   osmUrl: text("osm_url"),
+});
+
+export const canvasAudioMeta = sqliteTable("canvas_audio_meta", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  nodeId: integer("node_id")
+    .notNull()
+    .references(() => canvasNodes.id, { onDelete: "cascade" }),
+  sourceType: text("source_type").notNull().default("local"), // "local" | "youtube"
+  youtubeVideoId: text("youtube_video_id"),
+  title: text("title"),
+  author: text("author"),
+  thumbnailUrl: text("thumbnail_url"),
 });
 
 export const canvasFiles = sqliteTable("canvas_files", {

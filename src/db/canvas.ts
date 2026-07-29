@@ -45,6 +45,8 @@ export type CanvasNode = {
   width: number;
   cardType: string;
   aspectRatio: string;
+  collapsed: boolean;
+  seqOrder: number | null;
   createdAt: Date;
 };
 
@@ -75,7 +77,7 @@ export async function createCanvasNode(data: {
 
 export async function updateCanvasNode(
   id: number,
-  patch: Partial<Pick<CanvasNode, "title" | "description" | "x" | "y" | "width" | "aspectRatio">>
+  patch: Partial<Pick<CanvasNode, "title" | "description" | "x" | "y" | "width" | "aspectRatio" | "collapsed" | "seqOrder">>
 ): Promise<void> {
   await db.update(canvasNodes).set(patch).where(eq(canvasNodes.id, id));
 }

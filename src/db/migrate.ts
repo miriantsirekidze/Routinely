@@ -299,6 +299,32 @@ const migrations = [
     ],
   },
   {
+    id: "0015_node_collapsed",
+    statements: [
+      `ALTER TABLE canvas_nodes ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    id: "0017_node_seq_order",
+    statements: [
+      `ALTER TABLE canvas_nodes ADD COLUMN seq_order INTEGER`,
+    ],
+  },
+  {
+    id: "0016_canvas_audio",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS canvas_audio_meta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL REFERENCES canvas_nodes(id) ON DELETE CASCADE,
+        source_type TEXT NOT NULL DEFAULT 'local',
+        youtube_video_id TEXT,
+        title TEXT,
+        author TEXT,
+        thumbnail_url TEXT
+      )`,
+    ],
+  },
+  {
     id: "0012_canvas_components",
     statements: [
       `ALTER TABLE canvas_nodes ADD COLUMN card_type TEXT NOT NULL DEFAULT 'text-titled'`,

@@ -5,6 +5,7 @@ import {
   canvasMedia,
   canvasLinkMeta,
   canvasPlaceMeta,
+  canvasAudioMeta,
 } from "./schema";
 import { eq, asc } from "drizzle-orm";
 import { CanvasNode } from "./canvas";
@@ -48,12 +49,23 @@ export type CanvasPlaceMeta = {
   osmUrl: string | null;
 };
 
+export type CanvasAudioMeta = {
+  id: number;
+  nodeId: number;
+  sourceType: string; // "local" | "youtube"
+  youtubeVideoId: string | null;
+  title: string | null;
+  author: string | null;
+  thumbnailUrl: string | null;
+};
+
 export type NodeWithData = {
   node: CanvasNode;
   todoItems?: CanvasTodoItem[];
   mediaItems?: CanvasMediaItem[];
   linkMeta?: CanvasLinkMeta | null;
   placeMeta?: CanvasPlaceMeta | null;
+  audioMeta?: CanvasAudioMeta | null;
 };
 
 // ─── Node + supplemental data ─────────────────────────────────────────────────
@@ -82,6 +94,11 @@ export async function getNodeWithData(nodeId: number): Promise<NodeWithData | nu
     case "link": {
       const linkMeta = await getLinkMeta(nodeId);
       return { node, linkMeta };
+    }
+    case "audio": {
+      const mediaItems = await getMediaItems(nodeId);
+      const audioMeta = await getAudioMeta(nodeId);
+      return { node, mediaItems, audioMeta };
     }
     default:
       return { node };
@@ -219,6 +236,37 @@ export async function savePlaceMeta(nodeId: number, data: {
     osmUrl: data.osmUrl ?? null,
   }).returning();
   return result[0] as CanvasPlaceMeta;
+}
+
+// ─── Audio meta ───────────────────────────────────────────────────────────────
+
+export async function getAudioMeta(nodeId: number): Promise<CanvasAudioMeta | null> {
+  const rows = await db.select().from(canvasAudioMeta)
+    .where(eq(canvasAudioMeta.nodeId, nodeId)).limit(1);
+  return (rows[0] as CanvasAudioMeta) ?? null;
+}
+
+export async function saveAudioMeta(nodeId: number, data: {
+  sourceType: string;
+  youtubeVideoId?: string | null;
+  title?: string | null;
+  author?: string | null;
+  thumbnailUrl?: string | null;
+}): Promise<CanvasAudioMeta> {
+  const existing = await getAudioMeta(nodeId);
+  const values = {
+    sourceType: data.sourceType,
+    youtubeVideoId: data.youtubeVideoId ?? null,
+    title: data.title ?? null,
+    author: data.author ?? null,
+    thumbnailUrl: data.thumbnailUrl ?? null,
+  };
+  if (existing) {
+    await db.update(canvasAudioMeta).set(values).where(eq(canvasAudioMeta.nodeId, nodeId));
+    return (await getAudioMeta(nodeId))!;
+  }
+  const result = await db.insert(canvasAudioMeta).values({ nodeId, ...values }).returning();
+  return result[0] as CanvasAudioMeta;
 }
 
 // ─── OG fetch ─────────────────────────────────────────────────────────────────

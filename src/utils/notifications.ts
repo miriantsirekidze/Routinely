@@ -77,6 +77,27 @@ export async function showTargetExceededNotification(
   });
 }
 
+/**
+ * Schedule a one-off reminder notification that fires at `date` with the given message.
+ * Requests notification permission first. Returns the scheduled id, or "" if not permitted.
+ */
+export async function scheduleReminder(body: string, date: Date): Promise<string> {
+  const granted = await requestPermissions();
+  if (!granted) return "";
+
+  return Notifications.scheduleNotificationAsync({
+    content: {
+      title: "Reminder",
+      body,
+      sound: true,
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.DATE,
+      date,
+    },
+  });
+}
+
 export async function scheduleDayReminder() {
   const settings = useSettingsStore.getState();
   if (!settings.notifyDayReminder) return;
