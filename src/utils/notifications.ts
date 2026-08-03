@@ -1,5 +1,6 @@
 import * as Notifications from "expo-notifications";
 import { useSettingsStore } from "../stores/settingsStore";
+import { addReminder } from "./reminders";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -81,11 +82,15 @@ export async function showTargetExceededNotification(
  * Schedule a one-off reminder notification that fires at `date` with the given message.
  * Requests notification permission first. Returns the scheduled id, or "" if not permitted.
  */
-export async function scheduleReminder(body: string, date: Date): Promise<string> {
+export async function scheduleReminder(
+  body: string,
+  date: Date,
+  eventId?: number
+): Promise<string> {
   const granted = await requestPermissions();
   if (!granted) return "";
 
-  return Notifications.scheduleNotificationAsync({
+  const id = await Notifications.scheduleNotificationAsync({
     content: {
       title: "Reminder",
       body,
@@ -96,6 +101,8 @@ export async function scheduleReminder(body: string, date: Date): Promise<string
       date,
     },
   });
+  await addReminder({ id, body, fireAt: date.getTime(), eventId });
+  return id;
 }
 
 export async function scheduleDayReminder() {

@@ -14,7 +14,7 @@ It has five domains:
 
 1. **Activity tracking** — timed sessions with sub-activities (stopwatch), pause/rest/rep-rest, templates, a weekly schedule, history, trends, an activity heatmap, and a streak.
 2. **Habit trackers** — abstinence/streak counters with on-device LLM milestone notes at day thresholds and encouragement on relapse.
-3. **Calendar / events** — one-off or multi-day events with per-day notes and LLM-generated tips.
+3. **Calendar / events** — one-off or multi-day events with per-day notes, LLM tips, an optional start **time**, an OpenStreetMap **location or From→To route** (with distance/duration + a "leave by" reminder), per-event **reminders**, **photo/link attachments**, and an open-meteo **weather** forecast.
 4. **Journal** — folder-based, three folder types: **Notes** (freeform text), **Custom** (user-defined tracking fields), **Canvas** (2D spatial storyboard board).
 5. **Settings** — sound/haptics, notifications, CSV/JSON export, DB backup/restore, schedule import/export.
 
@@ -36,9 +36,12 @@ It has five domains:
 | Audio | expo-audio |
 | Files | expo-file-system, expo-document-picker |
 | Media pick | expo-image-picker, expo-image, expo-video |
-| WebView / YouTube | react-native-webview, react-native-youtube-iframe |
+| WebView / YouTube | react-native-webview (also raw, for the Leaflet map), react-native-youtube-iframe |
+| Date/time picker | react-native-date-picker (native wheel; needs rebuild) |
+| Maps / geo | Leaflet + OSM tiles in a WebView; Nominatim (geocode), OpenRouteService (routing, key), open-meteo (weather) |
 | Bottom sheets | @gorhom/bottom-sheet v5 |
 | Notifications | expo-notifications |
+| Rich text | @10play/tentap-editor (TipTap in a WebView) — Notes editor |
 | LLM | react-native-executorch (Qwen 2.5 1.5B quantized, on-device, ~880MB) |
 
 ## Project conventions (IMPORTANT — follow these)
@@ -47,20 +50,25 @@ It has five domains:
 - **All dates via `localDateStr()`** from `src/utils/date.ts` — never `.toISOString()` (that's UTC).
 - **Title case at display time** via `titleCase()` from `src/utils/text.ts`.
 - **npm installs need `--legacy-peer-deps`.** For Expo modules: `npm_config_legacy_peer_deps=true npx expo install <pkg>`.
-- **Migrations are hand-written SQL** in `src/db/migrate.ts` (an ordered array, each guarded by a unique `id`; runs on app launch). Not drizzle-kit at runtime. **Next migration id: `0018`.** Adding a native module requires a rebuild (`expo run:android`); a pure JS change or a new migration only needs a reload.
+- **Migrations are hand-written SQL** in `src/db/migrate.ts` (an ordered array, each guarded by a unique `id`; runs on app launch). Each entry is `{ id, statements?: string[], run?: () => void }` — `run` is for JS-only steps (e.g. pragma-guarded column adds, see `0018`). Not drizzle-kit at runtime. **Next migration id: `0022`.** Adding a native module requires a rebuild (`expo run:android`); a pure JS change or a new migration only needs a reload.
+- **Secrets/config**: `src/config.ts` reads `EXPO_PUBLIC_ORS_API_KEY` from a git-ignored `.env` (OpenRouteService). Only `EXPO_PUBLIC_`-prefixed vars are inlined by Metro; changing `.env` needs a Metro restart (`--clear`). Nominatim/open-meteo need no key.
+- **Caching**: DB reads on the tab screens go through `useCachedQuery(key, fetcher)` from `src/db/queryCache.ts` (stale-while-revalidate). Mutations call `invalidate("<domain>")` (already wired in `src/db/*.ts` write helpers). Add invalidation to any new write helper.
 - **Read the versioned Expo docs** (`https://docs.expo.dev/versions/v56.0.0/`) before using any Expo API — SDK 56 changed several (e.g., `expo-file-system` legacy API, `ImagePicker.MediaTypeOptions` is deprecated → use `['images']`/`['videos']`).
 - **TypeScript baseline is now 0 errors** (`npx tsc --noEmit` is clean). The formerly ~17 non-blocking errors were fixed: reanimated `SharedValue` now imported as a type, `expo-file-system` `cacheDirectory` via the `/legacy` entrypoint, `absoluteFillObject`/BottomSheetModal ref typing, and `new-folder.tsx`. The two runtime-sensitive forward-references in `canvas-editor.tsx` (`connections`, `handleEditById` used in dep arrays before declaration) are intentional and kept via documented `@ts-expect-error` — **do not reorder those declarations.** It still builds via Metro/Babel, not `tsc`. **After a change, confirm the count is still 0.**
 
 ## Database
 
-SQLite via Drizzle. Tables (migrations 0000–0017):
+SQLite via Drizzle. Tables (migrations 0000–0021):
 
 `days`, `sessions`, `sub_activities`, `pauses`, `session_templates`,
 `sub_activity_templates`, `weekly_schedule`, `tags`, `template_tags`, `streaks`,
-`trackers`, `tracker_resets`, `calendar_events`, `event_day_notes`,
+`trackers`, `tracker_resets`, `calendar_events`, `event_day_notes`, `event_attachments`,
 `journal_folders`, `journal_variables`, `journal_entries`, `journal_field_values`,
 `canvas_files`, `canvas_nodes`, `canvas_todo_items`, `canvas_media`,
 `canvas_link_meta`, `canvas_place_meta`, `canvas_connections`, `canvas_audio_meta`.
+
+- `calendar_events` was extended (migrations 0019–0021) with: `start_time`, location (`loc_lat/loc_lng/loc_name/osm_url`), route origin + cache (`origin_lat/origin_lng/origin_name/travel_mode/route_dist_m/route_dur_s/route_geo`), and `weather_cache`.
+- Event **reminders** are NOT in SQLite — they live in AsyncStorage via `src/utils/reminders.ts` (each tagged with an optional `eventId`; cancelled on event delete).
 
 - Schema: `src/db/schema.ts`. Migration runner + SQL: `src/db/migrate.ts`.
 - DB helpers per domain live in `src/db/*.ts` (e.g. `journal.ts`, `events.ts`, `trackers.ts`, `templates.ts`, `history.ts`, `trends.ts`, `heatmap.ts`, `canvas.ts`, `canvas-components.ts`).
@@ -79,30 +87,34 @@ app/
 │   └── settings.tsx         Settings
 ├── journal/
 │   ├── folder.tsx / new-folder.tsx / folder-settings.tsx
-│   ├── entry.tsx / new-entry.tsx           ← Notes editor lives here (rich text TODO)
+│   ├── new-entry.tsx        ← Notes editor (rich text DONE via RichTextEditor). entry.tsx is DEAD/unused
 │   ├── canvas.tsx / new-canvas-file.tsx
 │   └── canvas-editor.tsx                    ← Canvas Studio (3.7k lines; frozen)
-├── session/ (new, active, summary)   events/ (…)   trackers/ (…)   templates/edit.tsx
+├── session/ (new, active, summary)   trackers/ (…)   templates/edit.tsx
+├── events/  new.tsx / [id].tsx / day.tsx   ← enriched: location/route/reminders/attachments/weather
 src/
-├── db/  stores/  components/  hooks/  utils/  constants/theme.ts  llm/config.ts
+├── db/ (+ queryCache.ts)  stores/  hooks/  utils/  constants/theme.ts  llm/config.ts  config.ts
+├── components/  ← incl. RichTextEditor, MapPickerModal, MapPreview, MilestoneWorker
+├── utils/       ← incl. geocode.ts, routing.ts (ORS), weather.ts, reminders.ts, notifications.ts
 ```
 
-## Where to work next (priorities)
+## Status / recently completed
 
-These are the areas the owner wants addressed. **Canvas Studio is feature-complete and
-should be left alone unless explicitly asked.**
+**Canvas Studio is feature-complete — leave it alone unless explicitly asked.** The original
+three priorities are DONE:
+- **Notes rich text** — `src/components/RichTextEditor.tsx` (TenTap): bold/italic/strike/color/highlight/headings/lists/todo/quote toolbar above the keyboard, plus an inline reminder bar. Wired into `app/journal/new-entry.tsx` (description fields store HTML). Keyboard handled manually (Expo edge-to-edge defeats `adjustResize`): track IME height + pad by it.
+- **Nav/perf** — root has `SafeAreaProvider` (fixed header layout-shift) + `ios_from_right` Stack animation; `useCachedQuery` caching (see conventions); `MonthCalendar`/history memoized; journal cold-start fixed (migration `0018`).
+- **Events enrichment** — location, routing + leave-by, reminders, attachments, weather (see below).
 
-### 1. Notes — add rich text
-- The **Notes** journal folder type stores freeform text entries.
-- Relevant files: `app/journal/entry.tsx`, `app/journal/new-entry.tsx`, `app/journal/folder.tsx`, `src/db/journal.ts`, schema tables `journal_entries` / `journal_field_values`.
-- Goal: rich-text editing (bold/italic/lists/etc.). Investigate a RN rich-text approach compatible with SDK 56 / New Arch (there's no rich-text dep installed yet — evaluate options before adding one; a native module means a rebuild).
+### Events — enrichment reference
+- Screens: `app/events/new.tsx` (create), `app/events/[id].tsx` (detail), `app/events/day.tsx`.
+- **Location/route picker**: `src/components/MapPickerModal.tsx` — full-screen Leaflet/OSM WebView with a floating card; **Directions** toggle switches a single-place search into From(1)/To(2), draws the live ORS route + a bottom mode bar (drive/walk/cycle) with distance/time; returns place via `onPick` or route (with computed `RouteResult`) via `onPickRoute`. `MapPreview.tsx` is the read-only detail map (marker or route; uses `invalidateSize` + deferred fit).
+- **Detail map card**: one card shows a route (overlay distance/time badge, mode chips, "leave by" + remind) or a single location; Open-in-maps (`geo:` URI) / Edit / Remove.
+- Utils: `geocode.ts` (Nominatim), `routing.ts` (ORS `getRoute` behind one swappable fn + `formatDistance/Duration`), `weather.ts` (open-meteo), `reminders.ts` (AsyncStorage + expo-notifications).
+- Route origin is **per-event** (no cross-event default). Reminders/leave-by need the optional event `start_time`.
 
-### 2. Today screen — visual bugs
-- File: `app/(tabs)/index.tsx` (~520 lines). Sections: heatmap + streak, trackers row, upcoming events, "Up Next" suggestions, quick-start templates, scheduled list, footer actions.
-- Get a specific repro from the owner; fix layout/spacing/state issues.
-
-### 3. General performance
-- Likely candidates: large screens re-rendering, list virtualization, image loading, the on-device LLM init cost, and `canvas-editor.tsx` size (see Dev notes).
+### Current / next
+- **Canvas Studio location card** — the owner wants to change how the `place` card sets/shows a location. Today it's just a pasted Google-Maps-URL string (`canvas-editor.tsx` place edit sheet → `savePlaceMeta`, lat/lng saved as `null`). Reuse `MapPickerModal`/`MapPreview` + `canvas_place_meta` (which already has lat/lng/osm_url columns).
 
 ## Canvas Studio — condensed reference (frozen; don't edit unless asked)
 

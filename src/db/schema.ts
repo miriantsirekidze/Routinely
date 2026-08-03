@@ -134,10 +134,37 @@ export const calendarEvents = sqliteTable("calendar_events", {
   llmNote: text("llm_note"),
   startDate: text("start_date").notNull(),
   endDate: text("end_date").notNull(),
+  startTime: text("start_time"), // optional "HH:MM" 24h
   completed: integer("completed", { mode: "boolean" }).notNull().default(false),
+  // Location (destination) — OSM/Leaflet picker
+  locLat: real("loc_lat"),
+  locLng: real("loc_lng"),
+  locName: text("loc_name"),
+  osmUrl: text("osm_url"),
+  // Route origin + cached route (for "leave by")
+  originLat: real("origin_lat"),
+  originLng: real("origin_lng"),
+  originName: text("origin_name"),
+  travelMode: text("travel_mode"),
+  routeDistM: real("route_dist_m"),
+  routeDurS: real("route_dur_s"),
+  routeGeo: text("route_geo"), // cached polyline JSON [[lat,lng],...]
+  // Cached open-meteo forecast (JSON)
+  weatherCache: text("weather_cache"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
+});
+
+export const eventAttachments = sqliteTable("event_attachments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  eventId: integer("event_id")
+    .notNull()
+    .references(() => calendarEvents.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(), // "photo" | "link"
+  uri: text("uri").notNull(), // file uri (photo) or url (link)
+  title: text("title"), // link OG title / optional caption
+  sortOrder: integer("sort_order").notNull().default(0),
 });
 
 export const journalFolders = sqliteTable("journal_folders", {

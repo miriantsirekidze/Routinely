@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, Pressable, Dimensions,
-  Image, ScrollView, Modal, FlatList, ActivityIndicator, ToastAndroid,
+  Image, ScrollView, Modal, FlatList, ActivityIndicator, ToastAndroid, Linking,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
@@ -45,6 +45,9 @@ import * as DocumentPicker from "expo-document-picker";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import YoutubePlayer, { YoutubeIframeRef } from "react-native-youtube-iframe";
 import { DeleteConfirmSheet, DeleteConfirmSheetRef } from "../../src/components/DeleteConfirmSheet";
+import MapPreview from "../../src/components/MapPreview";
+import MapPickerModal, { PickedPlace } from "../../src/components/MapPickerModal";
+import { generateImage, pickGalleryImage, downloadImage } from "../../src/utils/imageGen";
 import { colors, typography, spacing, radius } from "../../src/constants/theme";
 import Feather from "@expo/vector-icons/Feather";
 
@@ -78,12 +81,16 @@ type CardType =
   | "place"
   | "gif"
   | "video"
-  | "audio";
+  | "audio"
+  // Transient picker-only choice: creates a normal "image" card, then opens the AI generate
+  // sheet. Never persisted as a cardType (the resulting node is stored as "image").
+  | "ai-image";
 
 const CARD_TYPE_OPTIONS: { type: CardType; icon: keyof typeof Feather.glyphMap; label: string }[] = [
   { type: "text-titled", icon: "type", label: "Note" },
   { type: "text-quote", icon: "message-square", label: "Quote" },
   { type: "image", icon: "image", label: "Image" },
+  { type: "ai-image", icon: "zap", label: "AI Image" },
   { type: "link", icon: "link", label: "Link" },
   { type: "todo", icon: "check-square", label: "To-do" },
   { type: "place", icon: "map-pin", label: "Place" },
@@ -242,46 +249,24 @@ function TodoContent({
 // ─── Place card content ───────────────────────────────────────────────────────
 
 function PlaceContent({
-  node, mediaItems, placeMeta, cardW, cardWidthSV,
+  node, placeMeta, cardW,
 }: {
-  node: CanvasNode; mediaItems: CanvasMediaItem[]; placeMeta: CanvasPlaceMeta | null | undefined;
-  cardW: number; cardWidthSV: SharedValue<number>;
+  node: CanvasNode; placeMeta: CanvasPlaceMeta | null | undefined; cardW: number;
 }) {
-  const mapsUrl = placeMeta?.googleMapsUrl ?? null;
-  const mediaStyle = useAnimatedStyle(() => ({
-    width: cardWidthSV.value,
-    height: cardWidthSV.value * 2 / 3,
-  }));
+  const hasLoc = placeMeta?.lat != null && placeMeta?.lng != null;
+  const h = Math.round(cardW * 0.55);
   return (
     <>
-      {mediaItems.length > 0 ? (
-        <ScrollView
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          style={{ marginHorizontal: -spacing.md, marginTop: -spacing.md }}
-        >
-          {mediaItems.map((m) => (
-            <Animated.View key={m.id} style={mediaStyle}>
-              <Image source={{ uri: m.uri }} style={{ width: "100%", height: "100%" }} resizeMode="cover" />
-            </Animated.View>
-          ))}
-        </ScrollView>
+      {hasLoc ? (
+        <MapPreview lat={placeMeta!.lat!} lng={placeMeta!.lng!} height={h} />
       ) : (
-        <Animated.View style={[contentStyles.imgPlaceholder, mediaStyle]}>
+        <View style={[contentStyles.imgPlaceholder, { width: "100%", height: h }]}>
           <Feather name="map-pin" size={28} color={colors.neutralLight} />
-        </Animated.View>
+        </View>
       )}
       <Text style={contentStyles.linkTitle} numberOfLines={2}>
         {placeMeta?.placeTitle ?? (node.title !== "New card" ? node.title : "")}
       </Text>
-      {!!mapsUrl && (
-        <View style={contentStyles.mapsRow}>
-          <Feather name="map-pin" size={12} color={colors.primary} />
-          <Text style={contentStyles.mapsUrl} numberOfLines={1}>{mapsUrl}</Text>
-          <Feather name="external-link" size={11} color={colors.textMuted} />
-        </View>
-      )}
     </>
   );
 }
@@ -822,7 +807,7 @@ function ComponentsDrawer({
           items.push({ key: `v${n.id}`, title: n.title && n.title !== "New card" ? n.title : "YouTube video", url: `https://youtu.be/${md.uri}`, icon: "youtube" });
       } else if (n.cardType === "place") {
         const m = supData.placeMetaMap[n.id];
-        if (m?.googleMapsUrl) items.push({ key: `p${n.id}`, title: m.placeTitle || "Place", url: m.googleMapsUrl, icon: "map-pin" });
+        if (m?.osmUrl) items.push({ key: `p${n.id}`, title: m.placeTitle || "Place", url: m.osmUrl, icon: "map-pin" });
       }
     }
     return items;
@@ -1097,7 +1082,7 @@ function CanvasCard({
       case "image": return <ImageContent node={node} mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
       case "link": return <LinkContent linkMeta={linkMeta} cardW={cardW} />;
       case "todo": return <TodoContent node={node} todoItems={todoItems} onToggle={(id, c) => onToggleTodo(node.id, id, c)} />;
-      case "place": return <PlaceContent node={node} mediaItems={mediaItems} placeMeta={placeMeta} cardW={cardW} cardWidthSV={cardWidth} />;
+      case "place": return <PlaceContent node={node} placeMeta={placeMeta} cardW={cardW} />;
       case "gif": return <GifContent mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
       case "video": return <VideoContent mediaItems={mediaItems} cardW={cardW} cardWidthSV={cardWidth} />;
       case "audio": return <AudioContent node={node} audioMeta={audioMeta} active={audioActive} playing={audioPlaying} />;
@@ -1345,9 +1330,12 @@ export default function CanvasEditorScreen() {
   const [editTodoItems, setEditTodoItems] = useState<CanvasTodoItem[]>([]);
   const [newTodoText, setNewTodoText] = useState("");
 
-  // Place edit
-  const [editPlusCode, setEditPlusCode] = useState("");
+  // Place edit — real coordinates picked via the map (no more pasted URL)
   const [editPlaceTitle, setEditPlaceTitle] = useState("");
+  const [editPlaceLat, setEditPlaceLat] = useState<number | null>(null);
+  const [editPlaceLng, setEditPlaceLng] = useState<number | null>(null);
+  const [editPlaceOsmUrl, setEditPlaceOsmUrl] = useState<string | null>(null);
+  const [placePickerOpen, setPlacePickerOpen] = useState(false);
 
   // Media edit — ref keeps the latest value so handleSaveEdit never reads a stale closure
   const [editMediaItems, setEditMediaItems] = useState<CanvasMediaItem[]>([]);
@@ -1362,6 +1350,24 @@ export default function CanvasEditorScreen() {
   const [mediaUrlInput, setMediaUrlInput] = useState("");
   const mediaUrlRef = useRef("");  // ref so handleAddMediaUrl always sees latest value
   const [editAspectRatio, setEditAspectRatio] = useState<"1:1" | "3:2" | "2:3">("3:2");
+
+  // AI image generation sheet (Cloudflare Workers AI). Targets a node id — either a freshly
+  // created card (from the "+" picker) or the current editing node (from the edit-sheet button).
+  const aiSheetRef = useRef<BottomSheetModal>(null);
+  const [aiTargetNodeId, setAiTargetNodeId] = useState<number | null>(null);
+  const aiOpenedFromFabRef = useRef(false); // true when the target node was just created by the picker
+  const aiDidGenerateRef = useRef(false);   // set on success so the dismiss handler keeps the card
+  // Prompt & reference-URL fields are UNCONTROLLED (value kept in refs, not state) so typing
+  // doesn't re-render this huge screen on every keystroke — that caused flicker on new lines and
+  // Android cursor jumps (e.g. a trailing space snapping back after the re-render landed). We
+  // bump `aiFieldKey` to remount (and thus reset) the fields when the sheet opens.
+  const aiPromptRef = useRef("");
+  const aiRefUrlRef = useRef("");
+  const [aiFieldKey, setAiFieldKey] = useState(0);
+  const [aiRefUri, setAiRefUri] = useState<string | null>(null);     // local uri of reference → editing
+  const [aiRefThumb, setAiRefThumb] = useState<string | null>(null); // preview uri for the reference
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   // Audio/video edit-sheet: source tab + the shared YouTube URL field
   const [audioSourceTab, setAudioSourceTab] = useState<"local" | "youtube">("local");
@@ -1952,7 +1958,12 @@ export default function CanvasEditorScreen() {
       }
       case "place": {
         const m = supData.placeMetaMap[nodeId];
-        if (m?.googleMapsUrl) WebBrowser.openBrowserAsync(m.googleMapsUrl);
+        if (m?.lat != null && m?.lng != null) {
+          const label = encodeURIComponent(m.placeTitle ?? "Place");
+          Linking.openURL(`geo:${m.lat},${m.lng}?q=${m.lat},${m.lng}(${label})`).catch(() => {});
+        } else if (m?.osmUrl) {
+          WebBrowser.openBrowserAsync(m.osmUrl);
+        }
         break;
       }
       case "audio":
@@ -2017,8 +2028,10 @@ export default function CanvasEditorScreen() {
     setEditLinkUrl("");
     setEditTodoItems([]);
     setNewTodoText("");
-    setEditPlusCode("");
     setEditPlaceTitle("");
+    setEditPlaceLat(null);
+    setEditPlaceLng(null);
+    setEditPlaceOsmUrl(null);
     setEditMediaItemsSynced([]);
     mediaUrlRef.current = "";
     setMediaUrlInput("");
@@ -2034,10 +2047,11 @@ export default function CanvasEditorScreen() {
     if (type === "place") {
       const meta = supData.placeMetaMap[node.id];
       if (meta) {
-        setEditPlusCode(meta.googleMapsUrl ?? meta.plusCode ?? "");
         setEditPlaceTitle(meta.placeTitle ?? "");
+        setEditPlaceLat(meta.lat ?? null);
+        setEditPlaceLng(meta.lng ?? null);
+        setEditPlaceOsmUrl(meta.osmUrl ?? null);
       }
-      setEditMediaItemsSynced(supData.mediaItemsMap[node.id] ?? []);
     }
     if (type === "image") {
       setEditAspectRatio((node.aspectRatio as "1:1" | "3:2" | "2:3") ?? "3:2");
@@ -2060,6 +2074,22 @@ export default function CanvasEditorScreen() {
     editSheetRef.current?.present();
   };
 
+  // ── Open AI generate sheet ────────────────────────────────────────────────
+
+  const openAiSheet = (node: CanvasNode, fromFab: boolean) => {
+    setAiTargetNodeId(node.id);
+    aiOpenedFromFabRef.current = fromFab;
+    aiDidGenerateRef.current = false;
+    aiPromptRef.current = "";
+    aiRefUrlRef.current = "";
+    setAiFieldKey((k) => k + 1); // remount the text fields so they reset to empty
+    setAiRefUri(null);
+    setAiRefThumb(null);
+    setAiError(null);
+    setAiLoading(false);
+    aiSheetRef.current?.present();
+  };
+
   // ── FAB: card type picker ─────────────────────────────────────────────────
 
   const handleFabPress = useCallback(() => {
@@ -2071,13 +2101,22 @@ export default function CanvasEditorScreen() {
     // (NOT (screenTarget - translate) / scale — that's wrong when scale ≠ 1)
     const cx = SW / 2 - translateX.value / scale.value;
     const cy = SH * 0.30 - translateY.value / scale.value;
+    // "ai-image" is a picker-only shortcut: it makes a normal image card, then opens the AI
+    // generate sheet (rather than the standard edit sheet) so everything downstream treats it
+    // as a plain image.
+    const isAi = type === "ai-image";
     const node = await createCanvasNode({
       fileId,
       title: type === "text-quote" ? "" : "New card",
       x: cx - CARD_W / 2,
       y: cy,
-      cardType: type,
+      cardType: isAi ? "image" : type,
     });
+    // FLUX.2 outputs square images — default AI cards to 1:1 so the full image shows.
+    if (isAi) {
+      await updateCanvasNode(node.id, { aspectRatio: "1:1" });
+      node.aspectRatio = "1:1";
+    }
     setNodes((prev) => [...prev, node]);
     // Seed supData entries for the new node
     setSupData((prev) => ({
@@ -2087,7 +2126,8 @@ export default function CanvasEditorScreen() {
       placeMetaMap: { ...prev.placeMetaMap, [node.id]: null },
       audioMetaMap: { ...prev.audioMetaMap, [node.id]: null },
     }));
-    openEditSheet(node);
+    if (isAi) openAiSheet(node, true);
+    else openEditSheet(node);
   }, [fileId, translateX, translateY, scale]);
 
   // ── Save edit ─────────────────────────────────────────────────────────────
@@ -2138,18 +2178,17 @@ export default function CanvasEditorScreen() {
 
     if (type === "place") {
       await savePlaceMeta(nid, {
-        plusCode: editPlusCode.trim(),
-        lat: null, lng: null,
+        plusCode: "",
+        lat: editPlaceLat,
+        lng: editPlaceLng,
         placeTitle: editPlaceTitle.trim() || null,
-        googleMapsUrl: editPlusCode.trim() || null,
-        osmUrl: null,
+        googleMapsUrl: null,
+        osmUrl: editPlaceOsmUrl,
       });
       const freshPlace = await getPlaceMeta(nid);
-      const freshPlaceMedia = await getMediaItems(nid);
       setSupData((prev) => ({
         ...prev,
         placeMetaMap: { ...prev.placeMetaMap, [nid]: freshPlace },
-        mediaItemsMap: { ...prev.mediaItemsMap, [nid]: freshPlaceMedia },
       }));
     }
 
@@ -2168,7 +2207,7 @@ export default function CanvasEditorScreen() {
 
     editSheetRef.current?.dismiss();
     setEditingNode(null);
-  }, [editingNode, editTitle, editDesc, editLinkUrl, editPlusCode, editPlaceTitle, editAspectRatio]);
+  }, [editingNode, editTitle, editDesc, editLinkUrl, editPlaceTitle, editPlaceLat, editPlaceLng, editPlaceOsmUrl, editAspectRatio]);
 
   // ── Todo item handlers ────────────────────────────────────────────────────
 
@@ -2252,6 +2291,73 @@ export default function CanvasEditorScreen() {
     await deleteMediaItem(itemId);
     setEditMediaItemsSynced((prev) => prev.filter((m) => m.id !== itemId));
   }, []);
+
+  // ── AI image generation handlers ──────────────────────────────────────────
+
+  const handleAiPickGallery = useCallback(async () => {
+    const uri = await pickGalleryImage();
+    if (!uri) return;
+    setAiRefUri(uri);
+    setAiRefThumb(uri);
+    setAiError(null);
+  }, []);
+
+  const handleAiAddRefUrl = useCallback(async () => {
+    const url = aiRefUrlRef.current.trim();
+    if (!url) return;
+    setAiLoading(true);
+    const uri = await downloadImage(url);
+    setAiLoading(false);
+    if (!uri) { setAiError("Couldn't load that image URL."); return; }
+    setAiRefUri(uri);
+    setAiRefThumb(url);
+    aiRefUrlRef.current = "";
+    setAiError(null);
+  }, []);
+
+  const handleAiClearRef = useCallback(() => {
+    setAiRefUri(null);
+    setAiRefThumb(null);
+  }, []);
+
+  const handleAiGenerate = useCallback(async () => {
+    if (aiTargetNodeId == null) return;
+    const prompt = aiPromptRef.current.trim();
+    if (!prompt) { setAiError("Enter a prompt first."); return; }
+    setAiLoading(true);
+    setAiError(null);
+    const res = await generateImage({ prompt, referenceUri: aiRefUri });
+    setAiLoading(false);
+    if ("error" in res) { setAiError(res.error); return; }
+    const item = await createMediaItem(aiTargetNodeId, res.uri, "image");
+    // Card content renders from supData.mediaItemsMap — append there so it appears immediately.
+    setSupData((prev) => ({
+      ...prev,
+      mediaItemsMap: {
+        ...prev.mediaItemsMap,
+        [aiTargetNodeId]: [...(prev.mediaItemsMap[aiTargetNodeId] ?? []), item],
+      },
+    }));
+    if (editingNode?.id === aiTargetNodeId) setEditMediaItemsSynced((prev) => [...prev, item]);
+    aiDidGenerateRef.current = true;
+    aiSheetRef.current?.dismiss();
+  }, [aiTargetNodeId, aiRefUri, editingNode]);
+
+  // If the sheet was opened from the "+" picker (a freshly created empty card) and nothing was
+  // generated, remove the orphan node so we don't leave a blank image card behind.
+  const handleAiDismiss = useCallback(() => {
+    const id = aiTargetNodeId;
+    if (aiOpenedFromFabRef.current && !aiDidGenerateRef.current && id != null) {
+      deleteCanvasNode(id);
+      setNodes((prev) => prev.filter((n) => n.id !== id));
+      setSupData((prev) => {
+        const mediaItemsMap = { ...prev.mediaItemsMap };
+        delete mediaItemsMap[id];
+        return { ...prev, mediaItemsMap };
+      });
+    }
+    setAiTargetNodeId(null);
+  }, [aiTargetNodeId]);
 
   const handlePickAudio = useCallback(async () => {
     if (!editingNode) return;
@@ -2519,6 +2625,12 @@ export default function CanvasEditorScreen() {
               <Feather name="camera" size={16} color={colors.primary} />
               <Text style={editStyles.mediaBtnText}>Camera</Text>
             </Pressable>
+            {type === "image" && editingNode && (
+              <Pressable style={editStyles.mediaBtn} onPress={() => openAiSheet(editingNode, false)}>
+                <Feather name="zap" size={16} color={colors.primary} />
+                <Text style={editStyles.mediaBtnText}>Generate</Text>
+              </Pressable>
+            )}
             {type === "video" && (
               <Pressable
                 style={[editStyles.mediaBtn, videoYtMode && editStyles.arBtnActive]}
@@ -2549,6 +2661,7 @@ export default function CanvasEditorScreen() {
     }
 
     if (type === "place") {
+      const hasLoc = editPlaceLat != null && editPlaceLng != null;
       return (
         <>
           <Text style={styles.editSheetTitle}>Edit Place</Text>
@@ -2559,62 +2672,31 @@ export default function CanvasEditorScreen() {
             placeholder="Place name"
             placeholderTextColor={colors.textMuted}
           />
-          <BottomSheetTextInput
-            style={styles.editInput}
-            value={editPlusCode}
-            onChangeText={setEditPlusCode}
-            placeholder="Google Maps URL (optional)"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-          />
-          {editMediaItems.length > 0 && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={editStyles.mediaScroll}>
-              {editMediaItems.map((m) => (
-                <View key={m.id} style={editStyles.mediaTile}>
-                  {m.uri.startsWith("http") ? (
-                    <View style={editStyles.mediaTileUrl}>
-                      <Feather name="link" size={14} color={colors.primary} />
-                      <Text style={editStyles.mediaTileUrlText} numberOfLines={2}>
-                        {m.uri.replace(/^https?:\/\//, "").substring(0, 30)}
-                      </Text>
-                    </View>
-                  ) : (
-                    <Image source={{ uri: m.uri }} style={editStyles.mediaTileImg} />
-                  )}
-                  <Pressable
-                    style={editStyles.mediaTileDelete}
-                    onPress={() => handleDeleteEditMedia(m.id)}
-                  >
-                    <Feather name="x" size={12} color={colors.white} />
-                  </Pressable>
-                </View>
-              ))}
-            </ScrollView>
+          {hasLoc ? (
+            <Pressable style={editStyles.placePreview} onPress={() => setPlacePickerOpen(true)}>
+              <MapPreview lat={editPlaceLat!} lng={editPlaceLng!} height={150} />
+              <View style={editStyles.placePreviewEdit}>
+                <Feather name="edit-2" size={13} color={colors.white} />
+              </View>
+            </Pressable>
+          ) : (
+            <Pressable style={editStyles.placePicker} onPress={() => setPlacePickerOpen(true)}>
+              <Feather name="map-pin" size={18} color={colors.primary} />
+              <Text style={editStyles.placePickerText}>Pick a location</Text>
+            </Pressable>
           )}
-          <View style={editStyles.mediaActions}>
-            <Pressable style={editStyles.mediaBtn} onPress={() => handlePickImage(false)}>
-              <Feather name="image" size={16} color={colors.primary} />
-              <Text style={editStyles.mediaBtnText}>Gallery</Text>
+          {hasLoc && (
+            <Pressable
+              style={editStyles.placeOpen}
+              onPress={() => {
+                const label = encodeURIComponent(editPlaceTitle.trim() || "Place");
+                Linking.openURL(`geo:${editPlaceLat},${editPlaceLng}?q=${editPlaceLat},${editPlaceLng}(${label})`).catch(() => {});
+              }}
+            >
+              <Feather name="navigation" size={14} color={colors.primary} />
+              <Text style={editStyles.placeOpenText}>Open in maps</Text>
             </Pressable>
-            <Pressable style={editStyles.mediaBtn} onPress={() => handlePickImage(true)}>
-              <Feather name="camera" size={16} color={colors.primary} />
-              <Text style={editStyles.mediaBtnText}>Camera</Text>
-            </Pressable>
-          </View>
-          <BottomSheetTextInput
-            style={styles.editInput}
-            value={mediaUrlInput}
-            onChangeText={(t) => { mediaUrlRef.current = t; setMediaUrlInput(t); }}
-            placeholder="Paste image URL, press Go ↵"
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="none"
-            keyboardType="url"
-            returnKeyType="go"
-            onSubmitEditing={handleAddMediaUrl}
-            blurOnSubmit={false}
-          />
+          )}
         </>
       );
     }
@@ -2942,10 +3024,103 @@ export default function CanvasEditorScreen() {
         </BottomSheetScrollView>
       </BottomSheetModal>
 
+      {/* AI generate sheet */}
+      <BottomSheetModal
+        ref={aiSheetRef}
+        snapPoints={["70%"]}
+        backgroundStyle={styles.sheetBg}
+        handleIndicatorStyle={styles.sheetHandle}
+        keyboardBehavior="extend"
+        onDismiss={handleAiDismiss}
+        backdropComponent={(props) => (
+          <BottomSheetBackdrop {...props} disappearsOnIndex={-1} appearsOnIndex={0} pressBehavior="close" />
+        )}
+      >
+        <BottomSheetScrollView contentContainerStyle={styles.editSheet} keyboardShouldPersistTaps="handled">
+          <Text style={styles.editSheetTitle}>Generate image</Text>
+
+          <BottomSheetTextInput
+            key={`ai-prompt-${aiFieldKey}`}
+            style={[styles.editInput, aiStyles.promptInput]}
+            defaultValue=""
+            onChangeText={(t) => { aiPromptRef.current = t; }}
+            placeholder="Describe the image… e.g. mountain at sunrise, motion blur, cinematic"
+            placeholderTextColor={colors.textMuted}
+            multiline
+          />
+
+          {/* Optional reference image → the model edits / restyles it, guided by the prompt */}
+          {aiRefThumb ? (
+            <View style={aiStyles.refRow}>
+              <Image source={{ uri: aiRefThumb }} style={aiStyles.refThumb} />
+              <View style={aiStyles.refTextWrap}>
+                <Text style={aiStyles.refLabel}>Reference added</Text>
+                <Text style={aiStyles.hint}>
+                  The image will be re-imagined following your prompt (e.g. "as a watercolor").
+                </Text>
+              </View>
+              <Pressable onPress={handleAiClearRef} hitSlop={8} style={aiStyles.refClear}>
+                <Feather name="x" size={14} color={colors.white} />
+              </Pressable>
+            </View>
+          ) : (
+            <>
+              <View style={editStyles.mediaActions}>
+                <Pressable style={editStyles.mediaBtn} onPress={handleAiPickGallery}>
+                  <Feather name="image" size={16} color={colors.primary} />
+                  <Text style={editStyles.mediaBtnText}>Reference (gallery)</Text>
+                </Pressable>
+              </View>
+              <BottomSheetTextInput
+                key={`ai-url-${aiFieldKey}`}
+                style={styles.editInput}
+                defaultValue=""
+                onChangeText={(t) => { aiRefUrlRef.current = t; }}
+                placeholder="…or paste an image URL, press Go ↵"
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="none"
+                keyboardType="url"
+                returnKeyType="go"
+                onSubmitEditing={handleAiAddRefUrl}
+                blurOnSubmit={false}
+              />
+            </>
+          )}
+
+          {!!aiError && <Text style={aiStyles.error}>{aiError}</Text>}
+
+          <Pressable
+            style={[styles.saveBtn, { marginTop: spacing.md }, aiLoading && aiStyles.genBtnDisabled]}
+            onPress={handleAiGenerate}
+            disabled={aiLoading}
+          >
+            {aiLoading ? (
+              <ActivityIndicator color={colors.white} />
+            ) : (
+              <Text style={styles.saveBtnText}>Generate</Text>
+            )}
+          </Pressable>
+        </BottomSheetScrollView>
+      </BottomSheetModal>
+
       {/* Delete confirm */}
       <DeleteConfirmSheet
         ref={deleteSheetRef}
         onConfirm={() => pendingDeleteRef.current?.()}
+      />
+
+      {/* Place location picker (single location; no directions on canvas places) */}
+      <MapPickerModal
+        visible={placePickerOpen}
+        initial={editPlaceLat != null && editPlaceLng != null
+          ? { lat: editPlaceLat, lng: editPlaceLng } : null}
+        onClose={() => setPlacePickerOpen(false)}
+        onPick={(p: PickedPlace) => {
+          setEditPlaceLat(p.lat);
+          setEditPlaceLng(p.lng);
+          setEditPlaceOsmUrl(p.osmUrl);
+          if (p.name && !editPlaceTitle.trim()) setEditPlaceTitle(p.name);
+        }}
       />
 
       {/* Full-screen image modal */}
@@ -3250,6 +3425,31 @@ const pickerStyles = StyleSheet.create({
 // ─── Edit sheet styles ────────────────────────────────────────────────────────
 
 const editStyles = StyleSheet.create({
+  placePreview: { marginTop: spacing.sm, borderRadius: radius.lg, overflow: "hidden" },
+  placePreviewEdit: {
+    position: "absolute",
+    top: spacing.sm,
+    right: spacing.sm,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "rgba(31,32,36,0.75)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  placePicker: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.primaryLightest,
+    borderRadius: radius.lg,
+  },
+  placePickerText: { ...typography.actionM, color: colors.primary },
+  placeOpen: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm, alignSelf: "flex-start" },
+  placeOpenText: { ...typography.actionM, color: colors.primary },
   todoRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -3338,6 +3538,35 @@ const editStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+});
+
+// ─── AI generate sheet styles ─────────────────────────────────────────────────
+
+const aiStyles = StyleSheet.create({
+  // Fixed height (not minHeight) so the field scrolls internally as you add lines instead of
+  // auto-growing — growing re-lays-out the BottomSheetScrollView every new line, which made the
+  // first line flicker until the input got tall enough to stop growing (~8–10 lines).
+  promptInput: { height: 120, textAlignVertical: "top", marginBottom: spacing.sm },
+  refRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  refThumb: { width: 56, height: 56, borderRadius: radius.sm, backgroundColor: colors.surface },
+  refTextWrap: { flex: 1 },
+  refLabel: { ...typography.actionS, color: colors.neutralDarkDarkest },
+  refClear: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  hint: { ...typography.captionM, color: colors.textMuted },
+  error: { ...typography.bodyS, color: colors.errorDark, marginTop: spacing.sm },
+  genBtnDisabled: { opacity: 0.6 },
 });
 
 // ─── Main styles ──────────────────────────────────────────────────────────────

@@ -18,6 +18,11 @@ interface SettingsState {
   scheduleFolderUri: string | null;
   scheduleFolderName: string | null;
 
+  // Default route origin ("Home") for event "leave by"
+  homeLat: number | null;
+  homeLng: number | null;
+  homeName: string | null;
+
   setSoundEnabled: (v: boolean) => void;
   setHapticsEnabled: (v: boolean) => void;
   setDefaultRestSeconds: (v: number) => void;
@@ -27,6 +32,8 @@ interface SettingsState {
   setDayReminderTime: (hour: number, minute: number) => void;
   setDailyCsvFolder: (uri: string | null, name: string | null) => void;
   setScheduleFolder: (uri: string | null, name: string | null) => void;
+  setHome: (lat: number, lng: number, name: string | null) => void;
+  clearHome: () => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -47,6 +54,10 @@ export const useSettingsStore = create<SettingsState>()(
       scheduleFolderUri: null,
       scheduleFolderName: null,
 
+      homeLat: null,
+      homeLng: null,
+      homeName: null,
+
       setSoundEnabled: (v) => set({ soundEnabled: v }),
       setHapticsEnabled: (v) => set({ hapticsEnabled: v }),
       setDefaultRestSeconds: (v) => set({ defaultRestSeconds: v }),
@@ -59,6 +70,8 @@ export const useSettingsStore = create<SettingsState>()(
         set({ dailyCsvFolderUri: uri, dailyCsvFolderName: name }),
       setScheduleFolder: (uri, name) =>
         set({ scheduleFolderUri: uri, scheduleFolderName: name }),
+      setHome: (lat, lng, name) => set({ homeLat: lat, homeLng: lng, homeName: name }),
+      clearHome: () => set({ homeLat: null, homeLng: null, homeName: null }),
     }),
     {
       name: "routinely-settings",

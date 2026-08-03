@@ -4,9 +4,11 @@ import Feather from "@expo/vector-icons/Feather";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import {
   RichText, useEditorBridge, useEditorContent, useBridgeState, TenTapStartKit,
+  editorHtml,
 } from "@10play/tentap-editor";
 import { colors, typography, spacing, radius } from "../constants/theme";
 import { scheduleReminder } from "../utils/notifications";
+import { listReminders, removeReminder, Reminder } from "../utils/reminders";
 
 // `value: null` clears the mark (back to default text / no highlight).
 type Swatch = { value: string | null; swatch: string };
@@ -25,6 +27,19 @@ const HIGHLIGHTS: Swatch[] = [
   { value: "#FBCFE8", swatch: "#FBCFE8" },
 ];
 const HEADINGS = [1, 2, 3] as const;
+
+// Horizontal padding for the editor content so text/placeholder align with the title and the
+// rest of the entry screen (all inset by spacing.lg) instead of hugging the screen edge.
+//
+// We bake the rule into the WebView's HTML <head> via TenTap's `customSource` option (below),
+// so it's present from the first byte and applies the instant ProseMirror mounts — no unpadded
+// "hug" frame. NOTE: it must NOT be injected via the WebView's
+// `injectedJavaScriptBeforeContentLoaded` prop — RichText already uses that prop to bootstrap
+// the editor (it sets `window.contentInjected`, which gates the React mount), so passing our
+// own there overrides TenTap's and leaves the editor completely blank. Re-applied on ready via
+// injectCSS as a harmless safety net.
+const CONTENT_CSS = `.ProseMirror{padding-left:${spacing.lg}px;padding-right:${spacing.lg}px;}`;
+const EDITOR_SOURCE = editorHtml.replace("<head>", `<head><style>${CONTENT_CSS}</style>`);
 
 type Props = {
   initialHTML: string;
@@ -45,6 +60,7 @@ export default function RichTextEditor({ initialHTML, onChange, keyboardVisible,
     initialContent: initialHTML || "",
     autofocus: false,
     avoidIosKeyboard: false,
+    customSource: EDITOR_SOURCE,
   });
   const state = useBridgeState(editor);
   const html = useEditorContent(editor, { type: "html", debounceInterval: 400 });
@@ -84,12 +100,13 @@ export default function RichTextEditor({ initialHTML, onChange, keyboardVisible,
     onChangeRef.current(html);
   }, [html]);
 
-  // Once the webview editor is ready: set the placeholder and give the content horizontal
-  // padding so text doesn't hug the screen edge (matches the rest of the entry screen).
+  // Once the webview editor is ready: set the placeholder (delivered via a bridge message, so
+  // it can't be baked into the HTML source) and re-apply the content padding as a safety net —
+  // the padding is already baked into EDITOR_SOURCE's <head>, so this is just belt-and-braces.
   useEffect(() => {
     if (!state.isReady) return;
     if (placeholder) editor.setPlaceholder(placeholder);
-    editor.injectCSS(".ProseMirror { padding-left: 20px; padding-right: 20px; }", "rt-hpad");
+    editor.injectCSS(CONTENT_CSS, "rt-hpad");
   }, [state.isReady]);
 
   // The bar stays up while the editor is focused, or while typing a reminder (which steals
@@ -271,44 +288,78 @@ function parseReminder(input: string): { ms: number; message: string } | null {
 }
 
 const formatFire = (d: Date) =>
-  d.toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" });
+  d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
-/** One-line reminder input shown in place of the toolbar. Type e.g. "1:15, Grab bread". */
+/**
+ * Reminder panel shown in place of the toolbar. Bottom row is the "new reminder" input
+ * (type e.g. "1:15, Grab bread"); any upcoming reminders are listed above it with edit/delete.
+ */
 function ReminderBar({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState("");
   const [hint, setHint] = useState<string | null>(null);
-  const [done, setDone] = useState<string | null>(null);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const inputRef = useRef<TextInput>(null);
+
+  const reload = () => { listReminders().then(setReminders); };
+  useEffect(() => { reload(); }, []);
 
   const submit = async () => {
     const parsed = parseReminder(text);
-    if (!parsed) {
-      setHint('Format: "1:15, message"');
-      return;
-    }
+    if (!parsed) { setHint('Format: "1:15, message"'); return; }
     const when = new Date(Date.now() + parsed.ms);
     const id = await scheduleReminder(parsed.message, when);
-    if (!id) {
-      setHint("Enable notifications in system settings.");
-      return;
-    }
-    setDone(formatFire(when));
-    setTimeout(onClose, 1400);
+    if (!id) { setHint("Enable notifications in system settings."); return; }
+    if (editingId) { await removeReminder(editingId); setEditingId(null); } // replace old
+    setText("");
+    setHint(null);
+    reload();
   };
 
-  if (done) {
-    return (
-      <View style={styles.reminderRow}>
-        <Feather name="check-circle" size={18} color={colors.successDark} />
-        <Text style={styles.reminderDone}>Reminder set · {done}</Text>
-      </View>
-    );
-  }
+  // Editing prefills the input with the remaining time + message and reschedules on submit.
+  const startEdit = (r: Reminder) => {
+    const totalMin = Math.max(1, Math.round((r.fireAt - Date.now()) / 60_000));
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    setText(`${h}:${String(m).padStart(2, "0")}, ${r.body}`);
+    setEditingId(r.id);
+    setHint(null);
+    inputRef.current?.focus();
+  };
+
+  const del = async (id: string) => {
+    await removeReminder(id);
+    if (editingId === id) { setEditingId(null); setText(""); }
+    reload();
+  };
 
   return (
     <View>
+      {reminders.length > 0 && (
+        <ScrollView
+          style={styles.reminderList}
+          keyboardShouldPersistTaps="always"
+          showsVerticalScrollIndicator={false}
+        >
+          {reminders.map((r) => (
+            <View key={r.id} style={styles.reminderItem}>
+              <Text style={styles.reminderItemTime}>{formatFire(new Date(r.fireAt))}</Text>
+              <Text style={styles.reminderItemMsg} numberOfLines={1}>{r.body}</Text>
+              <Pressable onPress={() => startEdit(r)} hitSlop={8} style={styles.reminderIconBtn}>
+                <Feather name="edit-2" size={17} color={colors.neutralDarkMedium} />
+              </Pressable>
+              <Pressable onPress={() => del(r.id)} hitSlop={8} style={styles.reminderIconBtn}>
+                <Feather name="trash-2" size={17} color={colors.errorDark} />
+              </Pressable>
+            </View>
+          ))}
+        </ScrollView>
+      )}
+
       <View style={styles.reminderRow}>
         <Feather name="bell" size={18} color={colors.primary} />
         <TextInput
+          ref={inputRef}
           style={styles.reminderInput}
           value={text}
           onChangeText={(t) => { setText(t); if (hint) setHint(null); }}
@@ -323,7 +374,11 @@ function ReminderBar({ onClose }: { onClose: () => void }) {
           <Feather name="x" size={20} color={colors.textMuted} />
         </Pressable>
         <Pressable onPress={submit} hitSlop={8} style={styles.reminderIconBtn}>
-          <Feather name="arrow-up-circle" size={22} color={text.trim() ? colors.primary : colors.neutralLightDark} />
+          <Feather
+            name={editingId ? "check-circle" : "arrow-up-circle"}
+            size={22}
+            color={text.trim() ? colors.primary : colors.neutralLightDark}
+          />
         </Pressable>
       </View>
       {!!hint && <Text style={styles.reminderHint}>{hint}</Text>}
@@ -341,6 +396,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+    backgroundColor: colors.background,
   },
   reminderInput: {
     flex: 1,
@@ -350,6 +406,25 @@ const styles = StyleSheet.create({
     includeFontPadding: false,
   },
   reminderIconBtn: { padding: 2 },
+  // Upcoming reminders list — each row matches the input container (square, white) and is
+  // separated by a 1px line (the last row's border also divides the list from the input).
+  reminderList: { maxHeight: 168 },
+  reminderItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.background,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  reminderItemTime: {
+    ...typography.bodyS,
+    color: colors.textMuted,
+    fontVariant: ["tabular-nums"],
+  },
+  reminderItemMsg: { flex: 1, ...typography.bodyM, color: colors.neutralDarkDarkest },
   reminderDone: { ...typography.bodyM, color: colors.neutralDarkMedium },
   reminderHint: {
     ...typography.bodyS,

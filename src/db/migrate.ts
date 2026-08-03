@@ -393,6 +393,43 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    // Event enrichment: location + route + weather columns on calendar_events, and an
+    // event_attachments table for photos/links.
+    id: "0019_event_enrichment",
+    statements: [
+      `ALTER TABLE "calendar_events" ADD COLUMN "loc_lat" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "loc_lng" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "loc_name" text`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "osm_url" text`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "origin_lat" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "origin_lng" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "origin_name" text`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "travel_mode" text`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "route_dist_m" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "route_dur_s" real`,
+      `ALTER TABLE "calendar_events" ADD COLUMN "weather_cache" text`,
+      `CREATE TABLE IF NOT EXISTS "event_attachments" (
+        "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+        "event_id" integer NOT NULL REFERENCES "calendar_events"("id") ON DELETE CASCADE,
+        "kind" text NOT NULL,
+        "uri" text NOT NULL,
+        "title" text,
+        "sort_order" integer NOT NULL DEFAULT 0
+      )`,
+    ],
+  },
+  {
+    // Optional time-of-day ("HH:MM", 24h) for an event — enables precise reminders + leave-by.
+    id: "0020_event_start_time",
+    statements: [`ALTER TABLE "calendar_events" ADD COLUMN "start_time" text`],
+  },
+  {
+    // Cached route polyline (JSON [[lat,lng],...]) so the detail map draws the route
+    // instantly on open without re-hitting the routing API.
+    id: "0021_event_route_geo",
+    statements: [`ALTER TABLE "calendar_events" ADD COLUMN "route_geo" text`],
+  },
 ];
 
 export function runMigrations() {

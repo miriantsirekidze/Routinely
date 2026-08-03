@@ -1,8 +1,9 @@
 import { db } from "./client";
-import { calendarEvents, eventDayNotes } from "./schema";
+import { calendarEvents, eventDayNotes, eventAttachments } from "./schema";
 import { eq, and, lte, gte } from "drizzle-orm";
 import { localDateStr, addDays } from "../utils/date";
 import { invalidate } from "./queryCache";
+import { removeEventReminders } from "../utils/reminders";
 
 export type CalendarEvent = {
   id: number;
@@ -11,7 +12,23 @@ export type CalendarEvent = {
   llmNote: string | null;
   startDate: string;
   endDate: string;
+  startTime: string | null;
   completed: boolean;
+  // Location (destination)
+  locLat: number | null;
+  locLng: number | null;
+  locName: string | null;
+  osmUrl: string | null;
+  // Route origin + cached route
+  originLat: number | null;
+  originLng: number | null;
+  originName: string | null;
+  travelMode: string | null;
+  routeDistM: number | null;
+  routeDurS: number | null;
+  routeGeo: string | null;
+  // Cached forecast JSON
+  weatherCache: string | null;
   createdAt: Date;
 };
 
@@ -23,8 +40,18 @@ export type EventDayNote = {
   completed: boolean;
 };
 
+export type EventAttachment = {
+  id: number;
+  eventId: number;
+  kind: "photo" | "link";
+  uri: string;
+  title: string | null;
+  sortOrder: number;
+};
+
 export type CalendarEventWithNotes = CalendarEvent & {
   dayNotes: EventDayNote[];
+  attachments: EventAttachment[];
 };
 
 export async function getEventsForMonth(
@@ -65,6 +92,18 @@ export async function createEvent(data: {
   description?: string | null;
   startDate: string;
   endDate: string;
+  startTime?: string | null;
+  locLat?: number | null;
+  locLng?: number | null;
+  locName?: string | null;
+  osmUrl?: string | null;
+  originLat?: number | null;
+  originLng?: number | null;
+  originName?: string | null;
+  travelMode?: string | null;
+  routeDistM?: number | null;
+  routeDurS?: number | null;
+  routeGeo?: string | null;
 }): Promise<CalendarEvent> {
   invalidate("events");
   const result = await db.insert(calendarEvents).values(data).returning();
@@ -73,14 +112,30 @@ export async function createEvent(data: {
 
 export async function updateEvent(
   id: number,
-  patch: Partial<Pick<CalendarEvent, "title" | "startDate" | "endDate" | "completed">>
+  patch: Partial<Omit<CalendarEvent, "id" | "createdAt">>
 ): Promise<void> {
   invalidate("events");
   await db.update(calendarEvents).set(patch).where(eq(calendarEvents.id, id));
 }
 
+export type PickedLocation = { lat: number; lng: number; name: string | null; osmUrl?: string | null };
+
+/** Set (or clear, with null) an event's destination location. */
+export async function setEventLocation(id: number, loc: PickedLocation | null): Promise<void> {
+  invalidate("events");
+  await db
+    .update(calendarEvents)
+    .set(
+      loc
+        ? { locLat: loc.lat, locLng: loc.lng, locName: loc.name, osmUrl: loc.osmUrl ?? null }
+        : { locLat: null, locLng: null, locName: null, osmUrl: null }
+    )
+    .where(eq(calendarEvents.id, id));
+}
+
 export async function deleteEvent(id: number): Promise<void> {
   invalidate("events");
+  await removeEventReminders(id);
   await db.delete(calendarEvents).where(eq(calendarEvents.id, id));
 }
 
@@ -100,7 +155,42 @@ export async function getEventWithNotes(
     .where(eq(eventDayNotes.eventId, id))
     .orderBy(eventDayNotes.date);
 
-  return { ...(rows[0] as CalendarEvent), dayNotes: notes as EventDayNote[] };
+  const attachments = await getEventAttachments(id);
+
+  return {
+    ...(rows[0] as CalendarEvent),
+    dayNotes: notes as EventDayNote[],
+    attachments,
+  };
+}
+
+export async function getEventAttachments(eventId: number): Promise<EventAttachment[]> {
+  return db
+    .select()
+    .from(eventAttachments)
+    .where(eq(eventAttachments.eventId, eventId))
+    .orderBy(eventAttachments.sortOrder) as Promise<EventAttachment[]>;
+}
+
+export async function addEventAttachment(
+  eventId: number,
+  data: { kind: "photo" | "link"; uri: string; title?: string | null }
+): Promise<void> {
+  invalidate("events");
+  const existing = await getEventAttachments(eventId);
+  const nextOrder = existing.length ? existing[existing.length - 1].sortOrder + 1 : 0;
+  await db.insert(eventAttachments).values({
+    eventId,
+    kind: data.kind,
+    uri: data.uri,
+    title: data.title ?? null,
+    sortOrder: nextOrder,
+  });
+}
+
+export async function deleteEventAttachment(id: number): Promise<void> {
+  invalidate("events");
+  await db.delete(eventAttachments).where(eq(eventAttachments.id, id));
 }
 
 export async function saveLLMNote(id: number, note: string): Promise<void> {

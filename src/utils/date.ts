@@ -2,6 +2,23 @@ export function localDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** "HH:MM" (24h) → "9:00 AM". */
+export function format12h(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
+  if (Number.isNaN(h)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m ?? 0).padStart(2, "0")} ${period}`;
+}
+
+/** Combine a date string ("YYYY-MM-DD") + optional "HH:MM" into a Date (local). */
+export function combineDateTime(dateStr: string, hhmm: string | null): Date {
+  const [h, m] = (hhmm ?? "00:00").split(":").map((x) => parseInt(x, 10));
+  const d = new Date(dateStr + "T00:00:00");
+  d.setHours(h || 0, m || 0, 0, 0);
+  return d;
+}
+
 export function addDays(date: Date, days: number): Date {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
